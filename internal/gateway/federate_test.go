@@ -25,6 +25,17 @@ type richUpstream struct {
 	promptDesc string      // greet's description; changing it is a rug pull on a prompt
 	events     chan string // JSON-RPC notifications to emit on open listen streams
 	listens    []map[string]any
+	extraRes   string // a resource the upstream adds after approval (rug pull on the resource list)
+}
+
+func (u *richUpstream) resourcesJSON() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	items := `{"uri":"` + u.label + `://static","name":"s","mimeType":"text/plain"}`
+	if u.extraRes != "" {
+		items += `,{"uri":"` + u.extraRes + `","name":"x"}`
+	}
+	return `[` + items + `]`
 }
 
 func (u *richUpstream) promptsJSON() string {
@@ -54,7 +65,7 @@ func newRich(t *testing.T, label string) *richUpstream {
 		case "prompts/get":
 			res(`{"messages":[{"role":"user","content":{"type":"text","text":"` + label + `:` + params["name"].(string) + `"}}]}`)
 		case "resources/list":
-			res(`{"resources":[{"uri":"` + label + `://static","name":"s"}]}`)
+			res(`{"resources":` + u.resourcesJSON() + `}`)
 		case "resources/templates/list":
 			res(`{"resourceTemplates":[{"uriTemplate":"` + label + `://item/{id}","name":"item"}]}`)
 		case "resources/read":
@@ -116,9 +127,19 @@ func richRelease(t *testing.T, naming string, ups ...*richUpstream) *release.Env
 		if err != nil {
 			t.Fatal(err)
 		}
-		digest, _ := federation.CatalogDigest(tools, prompts)
+		var rraws []json.RawMessage
+		_ = json.Unmarshal([]byte(u.resourcesJSON()), &rraws)
+		resources, err := federation.NormalizeResources(rraws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		templates, err := federation.NormalizeResourceTemplates([]json.RawMessage{json.RawMessage(`{"uriTemplate":"` + u.label + `://item/{id}","name":"item"}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest, _ := release.Catalog{Tools: tools, Prompts: prompts, Resources: resources, ResourceTemplates: templates}.Digest()
 		d.Targets = append(d.Targets, release.Target{Name: u.label, ServerID: "s-" + u.label, Endpoint: u.srv.URL + "/mcp",
-			Network: release.NetworkLoopback, SnapshotDigest: digest, Tools: tools, Prompts: prompts,
+			Network: release.NetworkLoopback, SnapshotDigest: digest, Tools: tools, Prompts: prompts, Resources: resources, ResourceTemplates: templates,
 			Capabilities: []string{release.CapTools, release.CapPrompts, release.CapResources, release.CapCompletions,
 				release.CapResourcesSubscribe, release.CapResourcesListChanged}})
 		d.Grants = append(d.Grants,
@@ -294,5 +315,36 @@ func TestPromptsArePinnedAndDriftBlocksThem(t *testing.T) {
 	// a prompt the upstream added after approval is neither listed nor routed
 	if r := h.rpc(t, operatorKey, "prompts/get", `{"name":"alpha__new_one",`+metaJSON+`}`, map[string]string{server.HeaderName: "alpha__new_one"}); errCode(r) != server.CodeInvalidParams {
 		t.Fatalf("unpinned prompt routed: %s", r.raw)
+	}
+}
+
+func TestResourcesArePinnedAndDriftBlocksThem(t *testing.T) {
+	a := newRich(t, "alpha")
+	h := richHarness(t, richRelease(t, release.NamingPrefixed, a))
+	h.g.CheckDrift(t.Context(), h.g.cur.Load())
+	if st := h.g.Status(); st.Targets[0].Status != TargetOK {
+		t.Fatalf("before: %+v", st.Targets[0])
+	}
+	// the pinned definition is served with every field (mimeType), not the live one
+	r := h.rpc(t, operatorKey, "resources/list", "", nil)
+	if !strings.Contains(r.raw, `"mimeType":"text/plain"`) {
+		t.Fatalf("pinned fields lost: %s", r.raw)
+	}
+	a.mu.Lock()
+	a.extraRes = "alpha://leaked-after-approval"
+	a.mu.Unlock()
+	if got := names(h.rpc(t, operatorKey, "resources/list", "", nil), "resources", "uri"); strings.Join(got, ",") != "alpha://static" {
+		t.Fatalf("resources/list must serve the pinned list: %v", got)
+	}
+	r = h.rpc(t, operatorKey, "resources/read", `{"uri":"alpha://leaked-after-approval",`+metaJSON+`}`, map[string]string{server.HeaderName: "alpha://leaked-after-approval"})
+	if errCode(r) != server.CodeInvalidParams || len(a.methods()) > 0 && a.methods()[len(a.methods())-1] == "resources/read" {
+		t.Fatalf("unpinned resource read: %s (upstream saw %v)", r.raw, a.methods())
+	}
+	h.g.CheckDrift(t.Context(), h.g.cur.Load())
+	if st := h.g.Status(); st.Targets[0].Status != TargetDrifted {
+		t.Fatalf("resource rug pull not detected: %+v", st.Targets[0])
+	}
+	if r := h.rpc(t, operatorKey, "resources/read", `{"uri":"alpha://static",`+metaJSON+`}`, map[string]string{server.HeaderName: "alpha://static"}); r.status != 503 {
+		t.Fatalf("drifted target still served reads: %d %s", r.status, r.raw)
 	}
 }

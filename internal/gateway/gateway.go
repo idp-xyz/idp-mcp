@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -92,10 +93,31 @@ type state struct {
 	upstream *client.Client
 	loadedAt time.Time
 
-	listings listings // prompt/resource ownership, cached from upstream listings
+	resources map[string]*resourceIndex // pinned resource URIs and templates per target
 
 	mu      sync.Mutex
 	targets map[string]TargetStatus
+}
+
+// resourceIndex answers "does this target pin uri" (exactly, or by template).
+type resourceIndex struct {
+	uris      map[string]bool
+	templates []*regexp.Regexp
+}
+
+func (x *resourceIndex) owns(uri string) (exact, byTemplate bool) {
+	if x == nil {
+		return false, false
+	}
+	if x.uris[uri] {
+		return true, false
+	}
+	for _, re := range x.templates {
+		if re.MatchString(uri) {
+			return false, true
+		}
+	}
+	return false, false
 }
 
 func (s *state) target(name string) TargetStatus {
@@ -199,7 +221,18 @@ func (g *Gateway) activate(env *release.Envelope) error {
 			return fmt.Errorf("release %s: %w", doc.ReleaseID, err)
 		}
 	}
-	st := &state{env: env, doc: doc, auth: auth, policy: authorization.Compile(doc), router: routing.New(doc), args: args,
+	resources := map[string]*resourceIndex{}
+	for _, t := range doc.Targets {
+		idx := &resourceIndex{uris: map[string]bool{}}
+		for _, r := range t.Resources {
+			idx.uris[r.URI] = true
+		}
+		for _, r := range t.ResourceTemplates {
+			idx.templates = append(idx.templates, templateRE(r.URITemplate))
+		}
+		resources[t.Name] = idx
+	}
+	st := &state{env: env, doc: doc, auth: auth, policy: authorization.Compile(doc), router: routing.New(doc), args: args, resources: resources,
 		upstream: &client.Client{HTTP: client.NewHTTPClient(policy.ForTargets(hosts, g.cfg.DevMode), g.cfg.CallTimeout, g.cfg.UpstreamTLS), Info: g.cfg.Info},
 		loadedAt: time.Now().UTC(), targets: map[string]TargetStatus{}}
 	for _, t := range doc.Targets {
@@ -300,13 +333,21 @@ func checkTarget(ctx context.Context, c *client.Client, t release.Target) Target
 	if err != nil {
 		return fail(err)
 	}
-	var promptRaws []json.RawMessage
+	var promptRaws, resRaws, tplRaws []json.RawMessage
 	if t.HasCapability(release.CapPrompts) {
 		if promptRaws, err = c.ListPrompts(ctx, t.Endpoint); err != nil {
 			return fail(err)
 		}
 	}
-	digest, err := liveDigest(raws, promptRaws)
+	if t.HasCapability(release.CapResources) {
+		if resRaws, err = c.List(ctx, t.Endpoint, "resources/list", "resources"); err != nil {
+			return fail(err)
+		}
+		if tplRaws, err = c.List(ctx, t.Endpoint, "resources/templates/list", "resourceTemplates"); err != nil {
+			return fail(err)
+		}
+	}
+	digest, err := liveDigest(raws, promptRaws, resRaws, tplRaws)
 	if err != nil {
 		ts.Status, ts.Detail = TargetInvalid, err.Error()
 		return ts

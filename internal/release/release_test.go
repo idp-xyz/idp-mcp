@@ -80,7 +80,27 @@ func TestValidateFailsClosed(t *testing.T) {
 		"capability":                       func(d *Document) { d.Targets[0].Capabilities = []string{"sampling"} },
 		"prompt grant without prompts":     func(d *Document) { d.Grants[0].Prompts = []string{"*"} },
 		"resource grant without resources": func(d *Document) { d.Grants[0].Resources = true },
-		"empty grant":                      func(d *Document) { d.Grants[0].Tools = nil },
+		"resources without capability": func(d *Document) {
+			d.Targets[0].Resources = []server.Resource{{URI: "x://a", Name: "a"}}
+			d.Targets[0].SnapshotDigest, _ = d.Targets[0].Catalog().Digest()
+		},
+		"resource uri without scheme": func(d *Document) {
+			d.Targets[0].Capabilities = []string{CapTools, CapResources}
+			d.Targets[0].Resources = []server.Resource{{URI: "not-a-uri", Name: "a"}}
+			d.Targets[0].SnapshotDigest, _ = d.Targets[0].Catalog().Digest()
+		},
+		"duplicate resource": func(d *Document) {
+			d.Targets[0].Capabilities = []string{CapTools, CapResources}
+			d.Targets[0].Resources = []server.Resource{{URI: "x://a", Name: "a"}, {URI: "x://a", Name: "b"}}
+			d.Targets[0].SnapshotDigest, _ = d.Targets[0].Catalog().Digest()
+		},
+		"resource edited after sealing": func(d *Document) {
+			d.Targets[0].Capabilities = []string{CapTools, CapResources}
+			d.Targets[0].Resources = []server.Resource{{URI: "x://a", Name: "a"}}
+			d.Targets[0].SnapshotDigest, _ = d.Targets[0].Catalog().Digest()
+			d.Targets[0].Resources[0].Description = "changed"
+		},
+		"empty grant": func(d *Document) { d.Grants[0].Tools = nil },
 		"native collision": func(d *Document) {
 			d.ToolNaming = NamingNative
 			t2 := d.Targets[0]
@@ -135,5 +155,35 @@ func TestExposedNames(t *testing.T) {
 		if _, _, ok := SplitExposedName(in); ok {
 			t.Errorf("%q split", in)
 		}
+	}
+}
+
+func TestPinnedResourcesRoundTripWithEveryField(t *testing.T) {
+	d := sample()
+	d.Targets[0].Capabilities = []string{CapTools, CapResources}
+	var r server.Resource
+	if err := json.Unmarshal([]byte(`{"uri":"x://a","name":"a","mimeType":"text/plain","size":12,"annotations":{"audience":["user"]},"_meta":{"v":1}}`), &r); err != nil {
+		t.Fatal(err)
+	}
+	var tpl server.ResourceTemplate
+	_ = json.Unmarshal([]byte(`{"uriTemplate":"x://item/{id}","name":"item","icons":[{"src":"x://i.png"}]}`), &tpl)
+	d.Targets[0].Resources, d.Targets[0].ResourceTemplates = []server.Resource{r}, []server.ResourceTemplate{tpl}
+	d.Targets[0].SnapshotDigest, _ = d.Targets[0].Catalog().Digest()
+	env, err := Seal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := Open(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(back.Targets[0].Resources[0])
+	for _, want := range []string{`"size":12`, `"audience":["user"]`, `"_meta":{"v":1}`, `"mimeType":"text/plain"`} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("%s lost %s", b, want)
+		}
+	}
+	if tb, _ := json.Marshal(back.Targets[0].ResourceTemplates[0]); !strings.Contains(string(tb), `"icons"`) {
+		t.Fatalf("%s lost icons", tb)
 	}
 }

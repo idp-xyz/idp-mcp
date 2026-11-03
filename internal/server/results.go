@@ -245,3 +245,93 @@ func PromptsListResult(prompts []Prompt, info ServerInfo) map[string]any {
 	}
 	return complete(map[string]any{"prompts": prompts}, info)
 }
+
+// decodeKnown reads a JSON object into the named string fields; every other field is returned as
+// Extra. Numbers are kept as written.
+func decodeKnown(b []byte, what string, strs map[string]*string) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil || m == nil {
+		return nil, errors.New(what + " must be a JSON object")
+	}
+	var extra map[string]any
+	for k, v := range m {
+		if ptr, known := strs[k]; known {
+			if v == nil {
+				continue
+			}
+			s, ok := v.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s %s must be a string", what, k)
+			}
+			*ptr = s
+			continue
+		}
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		extra[k] = v
+	}
+	return extra, nil
+}
+
+func encodeKnown(strs map[string]string, required []string, extra map[string]any) ([]byte, error) {
+	m := make(map[string]any, len(extra)+len(strs))
+	for k, v := range extra {
+		if _, known := strs[k]; !known {
+			m[k] = v
+		}
+	}
+	req := map[string]bool{}
+	for _, k := range required {
+		req[k] = true
+	}
+	for k, v := range strs {
+		if v != "" || req[k] {
+			m[k] = v
+		}
+	}
+	return json.Marshal(m)
+}
+
+// Resource is a resources/list entry, pinned like a tool (M5): uri, name, title, description and
+// mimeType are interpreted; everything else (size, annotations, icons, _meta) rides in Extra.
+type Resource struct {
+	URI, Name, Title, Description, MIMEType string
+	Extra                                   map[string]any
+}
+
+// MarshalJSON writes the known fields plus Extra.
+func (r Resource) MarshalJSON() ([]byte, error) {
+	return encodeKnown(map[string]string{"uri": r.URI, "name": r.Name, "title": r.Title, "description": r.Description, "mimeType": r.MIMEType},
+		[]string{"uri", "name"}, r.Extra)
+}
+
+// UnmarshalJSON reads a resource object.
+func (r *Resource) UnmarshalJSON(b []byte) error {
+	*r = Resource{}
+	extra, err := decodeKnown(b, "resource", map[string]*string{"uri": &r.URI, "name": &r.Name, "title": &r.Title, "description": &r.Description, "mimeType": &r.MIMEType})
+	r.Extra = extra
+	return err
+}
+
+// ResourceTemplate is a resources/templates/list entry, pinned like a resource.
+type ResourceTemplate struct {
+	URITemplate, Name, Title, Description, MIMEType string
+	Extra                                           map[string]any
+}
+
+// MarshalJSON writes the known fields plus Extra.
+func (r ResourceTemplate) MarshalJSON() ([]byte, error) {
+	return encodeKnown(map[string]string{"uriTemplate": r.URITemplate, "name": r.Name, "title": r.Title, "description": r.Description, "mimeType": r.MIMEType},
+		[]string{"uriTemplate", "name"}, r.Extra)
+}
+
+// UnmarshalJSON reads a resource template object.
+func (r *ResourceTemplate) UnmarshalJSON(b []byte) error {
+	*r = ResourceTemplate{}
+	extra, err := decodeKnown(b, "resource template", map[string]*string{"uriTemplate": &r.URITemplate, "name": &r.Name, "title": &r.Title, "description": &r.Description, "mimeType": &r.MIMEType})
+	r.Extra = extra
+	return err
+}

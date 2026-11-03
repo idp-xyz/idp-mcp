@@ -183,7 +183,25 @@ func TestOfficialConformance(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	digest, _ := federation.CatalogDigest(tools, prompts)
+	var resources []server.Resource
+	var templates []server.ResourceTemplate
+	if _, ok := disc.Capabilities[release.CapResources]; ok {
+		rraws, err := up.List(ctx, endpoint, "resources/list", "resources")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resources, err = federation.NormalizeResources(rraws); err != nil {
+			t.Fatal(err)
+		}
+		traws, err := up.List(ctx, endpoint, "resources/templates/list", "resourceTemplates")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if templates, err = federation.NormalizeResourceTemplates(traws); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest, _ := release.Catalog{Tools: tools, Prompts: prompts, Resources: resources, ResourceTemplates: templates}.Digest()
 	var names []string
 	for _, tl := range tools {
 		names = append(names, tl.Name)
@@ -193,7 +211,7 @@ func TestOfficialConformance(t *testing.T) {
 		CreatedAt: time.Now().UTC().Format(time.RFC3339), CreatedBy: "harness", ApprovedBy: "harness-reviewer",
 		DriftAction: "block", ToolNaming: release.NamingNative,
 		Targets: []release.Target{{Name: "reference", ServerID: "ref", Endpoint: endpoint, Network: release.NetworkLoopback,
-			SnapshotDigest: digest, Tools: tools, Prompts: prompts, Capabilities: caps}},
+			SnapshotDigest: digest, Tools: tools, Prompts: prompts, Resources: resources, ResourceTemplates: templates, Capabilities: caps}},
 		Grants: []release.Grant{{Target: "reference", Tools: names, Prompts: []string{"*"}, Resources: true, Roles: []string{"conformance"}}},
 		Auth:   release.Auth{Mode: "api-key", APIKeys: []release.APIKey{{ID: "k", Subject: "official-runner", Roles: []string{"conformance"}, SHA256: identity.HashKey(key)}}}}
 	env, err := release.Seal(doc)

@@ -35,7 +35,7 @@ const MaxUpstreamJSON = 16 << 20
 // MaxObservedStream bounds the copy of a relayed event stream kept to inspect its final message.
 const MaxObservedStream = 1 << 20
 
-func liveDigest(toolRaws, promptRaws []json.RawMessage) (string, error) {
+func liveDigest(toolRaws, promptRaws, resRaws, tplRaws []json.RawMessage) (string, error) {
 	tools, err := federation.NormalizeTools(toolRaws)
 	if err != nil {
 		return "", err
@@ -44,7 +44,15 @@ func liveDigest(toolRaws, promptRaws []json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return federation.CatalogDigest(tools, prompts)
+	resources, err := federation.NormalizeResources(resRaws)
+	if err != nil {
+		return "", err
+	}
+	templates, err := federation.NormalizeResourceTemplates(tplRaws)
+	if err != nil {
+		return "", err
+	}
+	return release.Catalog{Tools: tools, Prompts: prompts, Resources: resources, ResourceTemplates: templates}.Digest()
 }
 
 // Handler returns the gateway's HTTP handler.
@@ -176,9 +184,9 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	case "prompts/get":
 		g.promptsGet(w, r, st, req, pr)
 	case "resources/list":
-		g.resourcesList(w, r, st, req, pr, "resources/list", "resources", "uri")
+		g.resourcesList(w, r, st, req, pr, false)
 	case "resources/templates/list":
-		g.resourcesList(w, r, st, req, pr, "resources/templates/list", "resourceTemplates", "uriTemplate")
+		g.resourcesList(w, r, st, req, pr, true)
 	case "resources/read":
 		g.resourcesRead(w, r, st, req, pr)
 	case "completion/complete":

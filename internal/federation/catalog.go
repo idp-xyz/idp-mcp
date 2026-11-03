@@ -7,7 +7,9 @@ package federation
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
+	"strings"
 	"unicode/utf8"
 
 	"idp-mcp/internal/release"
@@ -100,11 +102,11 @@ func NormalizePrompts(raws []json.RawMessage) ([]server.Prompt, error) {
 }
 
 // ToolsDigest is the snapshot digest of a server that pins tools only.
-func ToolsDigest(tools []server.Tool) (string, error) { return release.CatalogDigest(tools, nil) }
+func ToolsDigest(tools []server.Tool) (string, error) { return release.Catalog{Tools: tools}.Digest() }
 
-// CatalogDigest is the snapshot digest of a normalized catalog (tools and prompts).
+// CatalogDigest is the snapshot digest of a catalog of tools and prompts (no resources).
 func CatalogDigest(tools []server.Tool, prompts []server.Prompt) (string, error) {
-	return release.CatalogDigest(tools, prompts)
+	return release.Catalog{Tools: tools, Prompts: prompts}.Digest()
 }
 
 // Capabilities maps a server/discover capability object to the federated capability names a release
@@ -131,4 +133,73 @@ func Capabilities(caps map[string]any) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// MaxResources bounds a pinned resource (or template) catalog.
+const MaxResources = 2000
+
+// NormalizeResources validates an upstream resources/list and returns it in pinned form, sorted by
+// URI. URIs must be absolute (a scheme) and unique.
+func NormalizeResources(raws []json.RawMessage) ([]server.Resource, error) {
+	if len(raws) > MaxResources {
+		return nil, fmt.Errorf("catalog has %d resources, more than %d", len(raws), MaxResources)
+	}
+	seen := map[string]bool{}
+	out := make([]server.Resource, 0, len(raws))
+	for _, raw := range raws {
+		if len(raw) > MaxSchemaBytes {
+			return nil, fmt.Errorf("a resource definition exceeds %d bytes", MaxSchemaBytes)
+		}
+		var r server.Resource
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return nil, fmt.Errorf("resource entry: %w", err)
+		}
+		if !ValidResourceURI(r.URI) || seen[r.URI] {
+			return nil, fmt.Errorf("resource uri %q is invalid or duplicated", r.URI)
+		}
+		seen[r.URI] = true
+		if !utf8.ValidString(r.Description) || len(r.Description) > MaxDescription || len(r.Title) > MaxTitle || len(r.Name) > MaxTitle {
+			return nil, fmt.Errorf("resource %s: name, title or description too long", r.URI)
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].URI < out[j].URI })
+	return out, nil
+}
+
+// NormalizeResourceTemplates validates an upstream resources/templates/list, sorted by template.
+func NormalizeResourceTemplates(raws []json.RawMessage) ([]server.ResourceTemplate, error) {
+	if len(raws) > MaxResources {
+		return nil, fmt.Errorf("catalog has %d resource templates, more than %d", len(raws), MaxResources)
+	}
+	seen := map[string]bool{}
+	out := make([]server.ResourceTemplate, 0, len(raws))
+	for _, raw := range raws {
+		if len(raw) > MaxSchemaBytes {
+			return nil, fmt.Errorf("a resource template exceeds %d bytes", MaxSchemaBytes)
+		}
+		var r server.ResourceTemplate
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return nil, fmt.Errorf("resource template entry: %w", err)
+		}
+		if r.URITemplate == "" || len(r.URITemplate) > 2048 || !strings.Contains(r.URITemplate, "{") || seen[r.URITemplate] {
+			return nil, fmt.Errorf("resource template %q is invalid or duplicated", r.URITemplate)
+		}
+		seen[r.URITemplate] = true
+		if !utf8.ValidString(r.Description) || len(r.Description) > MaxDescription || len(r.Title) > MaxTitle || len(r.Name) > MaxTitle {
+			return nil, fmt.Errorf("resource template %s: name, title or description too long", r.URITemplate)
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].URITemplate < out[j].URITemplate })
+	return out, nil
+}
+
+// ValidResourceURI accepts absolute URIs of bounded length.
+func ValidResourceURI(uri string) bool {
+	if uri == "" || len(uri) > 2048 || !utf8.ValidString(uri) {
+		return false
+	}
+	u, err := url.Parse(uri)
+	return err == nil && u.Scheme != ""
 }

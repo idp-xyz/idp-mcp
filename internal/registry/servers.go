@@ -181,10 +181,36 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 			return nil, fail(http.StatusUnprocessableEntity, "prompt catalog refused: %s", err.Error())
 		}
 	}
+	var resources []server.Resource
+	var templates []server.ResourceTemplate
+	if _, ok := disc.Capabilities[release.CapResources]; ok {
+		rraws, err := s.Upstream.List(dctx, sv.Endpoint, "resources/list", "resources")
+		if err != nil {
+			return nil, fail(http.StatusBadGateway, "resources/list failed: %s", err.Error())
+		}
+		if resources, err = federation.NormalizeResources(rraws); err != nil {
+			return nil, fail(http.StatusUnprocessableEntity, "resource catalog refused: %s", err.Error())
+		}
+		traws, err := s.Upstream.List(dctx, sv.Endpoint, "resources/templates/list", "resourceTemplates")
+		if err != nil {
+			return nil, fail(http.StatusBadGateway, "resources/templates/list failed: %s", err.Error())
+		}
+		if templates, err = federation.NormalizeResourceTemplates(traws); err != nil {
+			return nil, fail(http.StatusUnprocessableEntity, "resource template catalog refused: %s", err.Error())
+		}
+	}
 	if err := s.checkSchemas(tools); err != nil {
 		return nil, fail(http.StatusUnprocessableEntity, "catalog refused: %s", err.Error())
 	}
-	digest, _ := federation.CatalogDigest(tools, prompts)
+	digest, _ := release.Catalog{Tools: tools, Prompts: prompts, Resources: resources, ResourceTemplates: templates}.Digest()
+	if resources == nil {
+		resources = []server.Resource{}
+	}
+	if templates == nil {
+		templates = []server.ResourceTemplate{}
+	}
+	resourcesJSON, _ := release.Canonical(resources)
+	templatesJSON, _ := release.Canonical(templates)
 	discovery, _ := json.Marshal(map[string]any{"supportedVersions": disc.SupportedVersions, "capabilities": disc.Capabilities, "serverInfo": disc.ServerInfo()})
 	toolsJSON, _ := release.Canonical(tools)
 	if prompts == nil {
@@ -198,8 +224,9 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 			return err
 		}
 		snap := NewID()
-		if _, err := tx.Exec(ctx, `INSERT INTO snapshots (id, tenant_id, server_id, digest, discovery, tools, prompts) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			snap, p.Tenant, id, digest, discovery, string(toolsJSON), string(promptsJSON)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO snapshots (id, tenant_id, server_id, digest, discovery, tools, prompts, resources, resource_templates)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			snap, p.Tenant, id, digest, discovery, string(toolsJSON), string(promptsJSON), string(resourcesJSON), string(templatesJSON)); err != nil {
 			return err
 		}
 		lifecycle := "REVIEWED"
@@ -209,7 +236,8 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 		if _, err := tx.Exec(ctx, `UPDATE servers SET snapshot_id = $2, lifecycle = $3, updated_at = now() WHERE id = $1`, id, snap, lifecycle); err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.discover", id, map[string]any{"digest": digest, "tools": len(tools), "prompts": len(prompts), "lifecycle": lifecycle}); err != nil {
+		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.discover", id, map[string]any{"digest": digest, "tools": len(tools), "prompts": len(prompts),
+			"resources": len(resources), "resourceTemplates": len(templates), "lifecycle": lifecycle}); err != nil {
 			return err
 		}
 		out, err = getServer(ctx, tx, id, false)

@@ -109,6 +109,10 @@ type Target struct {
 	SnapshotDigest string          `json:"snapshotDigest"` // CatalogDigest(Tools, Prompts): the full approved catalog
 	Tools          []server.Tool   `json:"tools"`          // native names
 	Prompts        []server.Prompt `json:"prompts"`        // native names; pinned like tools (M3)
+	// Resources and ResourceTemplates are pinned too (M5): resources/list is served from here and
+	// resources/read only accepts a pinned URI or one matching a pinned template.
+	Resources         []server.Resource         `json:"resources,omitempty"`
+	ResourceTemplates []server.ResourceTemplate `json:"resourceTemplates,omitempty"`
 	// Capabilities the server advertised in server/discover at approval, limited to the federated
 	// ones (tools, prompts, resources, completions). Prompts and resources are passed through live,
 	// not pinned; grants decide who may use them.
@@ -207,15 +211,39 @@ func Open(e *Envelope) (*Document, error) {
 // ExposedName is the tool name clients see.
 func ExposedName(target, tool string) string { return target + Separator + tool }
 
-// CatalogDigest is the snapshot digest of a server's approved catalog: its tools and its prompts.
+// Catalog is everything a snapshot pins about a server. Its digest is the snapshotDigest.
+type Catalog struct {
+	Tools             []server.Tool             `json:"tools"`
+	Prompts           []server.Prompt           `json:"prompts"`
+	Resources         []server.Resource         `json:"resources"`
+	ResourceTemplates []server.ResourceTemplate `json:"resourceTemplates"`
+}
+
+// Digest is the canonical digest of the catalog; nil slices count as empty.
+func (c Catalog) Digest() (string, error) {
+	if c.Tools == nil {
+		c.Tools = []server.Tool{}
+	}
+	if c.Prompts == nil {
+		c.Prompts = []server.Prompt{}
+	}
+	if c.Resources == nil {
+		c.Resources = []server.Resource{}
+	}
+	if c.ResourceTemplates == nil {
+		c.ResourceTemplates = []server.ResourceTemplate{}
+	}
+	return Digest(c)
+}
+
+// Catalog returns the target's pinned catalog.
+func (t *Target) Catalog() Catalog {
+	return Catalog{Tools: t.Tools, Prompts: t.Prompts, Resources: t.Resources, ResourceTemplates: t.ResourceTemplates}
+}
+
+// CatalogDigest is the digest of a catalog of tools and prompts without resources.
 func CatalogDigest(tools []server.Tool, prompts []server.Prompt) (string, error) {
-	if tools == nil {
-		tools = []server.Tool{}
-	}
-	if prompts == nil {
-		prompts = []server.Prompt{}
-	}
-	return Digest(map[string]any{"tools": tools, "prompts": prompts})
+	return Catalog{Tools: tools, Prompts: prompts}.Digest()
 }
 
 // SplitExposedName reverses ExposedName. Target names never contain '_', so the first separator is
@@ -269,8 +297,8 @@ func (d *Document) Validate() error {
 		if t.Network != NetworkPublic && t.Network != NetworkPrivate && t.Network != NetworkLoopback {
 			bad("target %s: network must be public, private or loopback", t.Name)
 		}
-		if dg, err := CatalogDigest(t.Tools, t.Prompts); err != nil || dg != t.SnapshotDigest {
-			bad("target %s: tools and prompts do not match snapshotDigest", t.Name)
+		if dg, err := t.Catalog().Digest(); err != nil || dg != t.SnapshotDigest {
+			bad("target %s: catalog does not match snapshotDigest", t.Name)
 		}
 		caps[t.Name] = map[string]bool{}
 		for _, c := range t.Capabilities {
@@ -304,6 +332,23 @@ func (d *Document) Validate() error {
 		prompts[t.Name] = map[string]bool{}
 		if len(t.Prompts) > 0 && !caps[t.Name][CapPrompts] {
 			bad("target %s pins prompts without the prompts capability", t.Name)
+		}
+		if (len(t.Resources) > 0 || len(t.ResourceTemplates) > 0) && !caps[t.Name][CapResources] {
+			bad("target %s pins resources without the resources capability", t.Name)
+		}
+		uris := map[string]bool{}
+		for _, r := range t.Resources {
+			if u, err := url.Parse(r.URI); err != nil || u.Scheme == "" || r.URI == "" || len(r.URI) > 2048 || uris[r.URI] {
+				bad("target %s: resource uri %q is invalid or duplicated", t.Name, r.URI)
+			}
+			uris[r.URI] = true
+		}
+		tpls := map[string]bool{}
+		for _, r := range t.ResourceTemplates {
+			if r.URITemplate == "" || len(r.URITemplate) > 2048 || tpls[r.URITemplate] {
+				bad("target %s: resource template %q is invalid or duplicated", t.Name, r.URITemplate)
+			}
+			tpls[r.URITemplate] = true
 		}
 		for _, p := range t.Prompts {
 			if !ValidToolName(p.Name) || !ValidToolName(d.Expose(t.Name, p.Name)) || prompts[t.Name][p.Name] {

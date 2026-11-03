@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"idp-mcp/internal/release"
 )
 
 func raws(items ...string) []json.RawMessage {
@@ -96,5 +98,39 @@ func TestCapabilitiesFromDiscovery(t *testing.T) {
 	}
 	if got := Capabilities(map[string]any{"tools": map[string]any{}}); strings.Join(got, ",") != "tools" {
 		t.Fatal(got)
+	}
+}
+
+func TestNormalizeResourcesAndTemplates(t *testing.T) {
+	res, err := NormalizeResources(raws(`{"uri":"test://b","name":"b"}`, `{"uri":"test://a","name":"a","size":3}`))
+	if err != nil || res[0].URI != "test://a" || res[1].URI != "test://b" || res[0].Extra["size"] == nil {
+		t.Fatalf("%v %v", res, err)
+	}
+	for _, bad := range [][]json.RawMessage{
+		raws(`{"uri":"no-scheme","name":"a"}`),
+		raws(`{"name":"a"}`),
+		raws(`{"uri":"test://a","name":"a"}`, `{"uri":"test://a","name":"b"}`),
+		raws(`{"uri":1,"name":"a"}`),
+	} {
+		if _, err := NormalizeResources(bad); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+	tpl, err := NormalizeResourceTemplates(raws(`{"uriTemplate":"test://{b}","name":"b"}`, `{"uriTemplate":"test://a/{x}","name":"a"}`))
+	if err != nil || tpl[0].URITemplate != "test://a/{x}" {
+		t.Fatalf("%v %v", tpl, err)
+	}
+	for _, bad := range [][]json.RawMessage{raws(`{"uriTemplate":"test://literal","name":"a"}`), raws(`{"name":"a"}`)} {
+		if _, err := NormalizeResourceTemplates(bad); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+	if empty, err := NormalizeResources(nil); err != nil || len(empty) != 0 {
+		t.Fatal("an empty resource list is valid")
+	}
+	d1, _ := release.Catalog{Resources: res}.Digest()
+	d2, _ := release.Catalog{}.Digest()
+	if d1 == d2 {
+		t.Fatal("resources must be part of the snapshot digest")
 	}
 }

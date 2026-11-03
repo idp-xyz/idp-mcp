@@ -176,7 +176,7 @@ func (g *Gateway) listen(w http.ResponseWriter, r *http.Request, st *state, req 
 		if len(f.Subscriptions) >= 100 {
 			break
 		}
-		owner, ok := g.resourceOwner(r.Context(), st, pr, uri)
+		owner, ok := g.resourceOwner(st, pr, uri)
 		if !ok || !targetHas(st.doc, owner, release.CapResourcesSubscribe) {
 			continue
 		}
