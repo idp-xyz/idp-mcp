@@ -119,6 +119,7 @@ type Gateway struct {
 	refused   atomic.Value // [2]string{digest, reason}
 	hosts     map[string]bool
 	listeners hub // open subscriptions/listen streams
+	tasks     taskStore
 	tracer    trace.Tracer
 }
 

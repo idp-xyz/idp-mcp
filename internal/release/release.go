@@ -70,7 +70,14 @@ const (
 	CapCompletions          = "completions"
 	CapResourcesSubscribe   = "resources.subscribe"
 	CapResourcesListChanged = "resources.listChanged"
+	// CapTasks: the server advertised the io.modelcontextprotocol/tasks extension (SEP-2663); its
+	// task-supporting tools may answer tools/call with a task the gateway then routes tasks/get and
+	// tasks/cancel for.
+	CapTasks = "tasks"
 )
+
+// TasksExtensionID is the extension key under capabilities.extensions.
+const TasksExtensionID = "io.modelcontextprotocol/tasks"
 
 // Expose returns the client-facing name of a target's tool or prompt.
 func (d *Document) Expose(target, name string) string {
@@ -268,7 +275,7 @@ func (d *Document) Validate() error {
 		caps[t.Name] = map[string]bool{}
 		for _, c := range t.Capabilities {
 			switch c {
-			case CapTools, CapPrompts, CapResources, CapCompletions, CapResourcesSubscribe, CapResourcesListChanged:
+			case CapTools, CapPrompts, CapResources, CapCompletions, CapResourcesSubscribe, CapResourcesListChanged, CapTasks:
 			default:
 				bad("target %s: unknown capability %q", t.Name, c)
 			}

@@ -1,0 +1,155 @@
+# mcp-gateway: the data plane. ONE REPLICA PER GATEWAY RECORD: the registry attests one status per
+# gateway id, so a second replica sharing the id and credential would overwrite the first one's
+# heartbeat. Scale horizontally by creating further gateway records (one Deployment each, behind a
+# shared Service or Ingress) - see deploy/kubernetes/README.md.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idp-mcp-gateway
+  namespace: idp-mcp
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idp-mcp-gateway-edge-1
+  namespace: idp-mcp
+data:
+  IDP_GATEWAY_LISTEN: "0.0.0.0:3220"
+  IDP_REGISTRY_URL: "https://idp-mcp-registry.idp-mcp.svc.cluster.local:8250"
+  IDP_REGISTRY_CA_FILE: "/etc/idp/registry-ca/ca.crt"
+  IDP_GATEWAY_CLIENT_CERT_FILE: "/etc/idp/client/tls.crt"
+  IDP_GATEWAY_CLIENT_KEY_FILE: "/etc/idp/client/tls.key"
+  IDP_GATEWAY_TLS_CERT_FILE: "/etc/idp/tls/tls.crt"
+  IDP_GATEWAY_TLS_KEY_FILE: "/etc/idp/tls/tls.key"
+  IDP_GATEWAY_TOKEN_FILE: "/etc/idp/credential/token"
+  # Host names clients use (the JWT resource host is accepted automatically)
+  IDP_GATEWAY_ALLOWED_HOSTS: "mcp.example.com,idp-mcp-gateway-edge-1.idp-mcp.svc.cluster.local"
+  IDP_RELEASE_CACHE: "/var/cache/idp/release.json"
+  IDP_UPSTREAM_CA_FILE: "/etc/idp/upstream-ca/ca.crt"
+  IDP_CALL_TIMEOUT: "60s"
+  IDP_DRIFT_INTERVAL: "60s"
+  IDP_LOG_LEVEL: "info"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idp-mcp-gateway-edge-1
+  namespace: idp-mcp
+  labels:
+    app.kubernetes.io/component: gateway
+    idp-mcp/gateway: edge-1
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate     # the record has one attested status; no two replicas at once
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: gateway
+      idp-mcp/gateway: edge-1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: gateway
+        idp-mcp/gateway: edge-1
+    spec:
+      serviceAccountName: idp-mcp-gateway
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: idp-mcp
+          command: ["/usr/local/bin/mcp-gateway"]
+          ports:
+            - name: mcp
+              containerPort: 3220
+          envFrom:
+            - configMapRef:
+                name: idp-mcp-gateway-edge-1
+          env:
+            - name: IDP_GATEWAY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: idp-mcp-gateway-edge-1
+                  key: gateway-id
+          volumeMounts:
+            - name: credential
+              mountPath: /etc/idp/credential
+              readOnly: true
+            - name: client-cert
+              mountPath: /etc/idp/client
+              readOnly: true
+            - name: tls
+              mountPath: /etc/idp/tls
+              readOnly: true
+            - name: registry-ca
+              mountPath: /etc/idp/registry-ca
+              readOnly: true
+            - name: upstream-ca
+              mountPath: /etc/idp/upstream-ca
+              readOnly: true
+            - name: cache
+              mountPath: /var/cache/idp
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: mcp
+              scheme: HTTPS
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: mcp
+              scheme: HTTPS
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: "2", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: credential
+          secret:
+            secretName: idp-mcp-gateway-edge-1     # token: the credential returned once by POST /api/v1/gateways
+            items: [{key: token, path: token}]
+        - name: client-cert
+          secret:
+            secretName: idp-mcp-gateway-edge-1-client-tls   # tls.crt with URI SAN spiffe://idp-mcp/gateway/<gateway id>
+        - name: tls
+          secret:
+            secretName: idp-mcp-gateway-edge-1-tls
+        - name: registry-ca
+          secret:
+            secretName: idp-mcp-registry-ca        # ca.crt: CA of the registry's server certificate
+        - name: upstream-ca
+          secret:
+            secretName: idp-mcp-upstream-ca
+            optional: true
+        - name: cache
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idp-mcp-gateway-edge-1
+  namespace: idp-mcp
+  labels:
+    app.kubernetes.io/component: gateway
+spec:
+  selector:
+    app.kubernetes.io/component: gateway
+    idp-mcp/gateway: edge-1
+  ports:
+    - name: mcp
+      port: 3220
+      targetPort: mcp

@@ -1,0 +1,19 @@
+# idp-mcp on Kubernetes (deploy/kubernetes/README.md). NOT YET APPLIED TO A CLUSTER: the reference
+# host has none. tests/deploy keeps these manifests internally consistent (labels, selectors, secret
+# references, hardening); `kubectl apply --dry-run=server -k deploy/kubernetes` is the next check.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: idp-mcp
+resources:
+  - namespace.yaml
+  - registry.yaml
+  - gateway.yaml
+  - migrate-job.yaml
+  - networkpolicy.yaml
+commonLabels:
+  app.kubernetes.io/name: idp-mcp
+  app.kubernetes.io/part-of: idp-telos
+images:
+  - name: idp-mcp
+    newName: registry.example.com/idp/idp-mcp   # set to the image built by deploy/build.sh, pinned by digest
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

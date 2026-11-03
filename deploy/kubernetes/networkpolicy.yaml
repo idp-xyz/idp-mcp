@@ -1,0 +1,153 @@
+# Network policy: default deny, then exactly the flows the architecture needs. The gateway's
+# dial-time address check (ADR D8) is the second layer; this is the first. Metadata endpoints
+# (169.254.169.254) are reachable from nothing because nothing allows them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: idp-mcp
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# DNS for every pod of the namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: idp-mcp
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+# registry: ingress from gateways (internal API) and from admin clients; egress to PostgreSQL,
+# the IdP (JWKS), the upstream MCP servers (discovery) and the trace collector.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: registry
+  namespace: idp-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: registry
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+        - namespaceSelector:
+            matchLabels:
+              idp-mcp/admin-clients: "true"
+      ports:
+        - {protocol: TCP, port: 8250}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: databases
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - {protocol: TCP, port: 5432}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              idp-mcp/mcp-upstream: "true"
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 8443}
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.10/32       # the IdP (JWKS); replace with its address or a namespaceSelector
+      ports:
+        - {protocol: TCP, port: 443}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - {protocol: TCP, port: 4318}
+---
+# gateway: ingress only on the MCP port from client namespaces; egress to the registry, the
+# upstream MCP servers, the IdP (JWKS) and the trace collector.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+  namespace: idp-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: gateway
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              idp-mcp/mcp-clients: "true"
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
+      ports:
+        - {protocol: TCP, port: 3220}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: registry
+      ports:
+        - {protocol: TCP, port: 8250}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              idp-mcp/mcp-upstream: "true"
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 8443}
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.10/32       # the IdP (JWKS)
+      ports:
+        - {protocol: TCP, port: 443}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - {protocol: TCP, port: 4318}
+---
+# migrate job: PostgreSQL only
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: migrate
+  namespace: idp-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: migrate
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: databases
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - {protocol: TCP, port: 5432}

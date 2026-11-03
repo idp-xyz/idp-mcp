@@ -1,0 +1,139 @@
+# registry-service: the control plane. Stateless apart from PostgreSQL; two replicas serialize
+# deployments per gateway through row locks. Serves HTTPS; /internal/v1 additionally requires a
+# gateway client certificate (mutual TLS) whose spiffe://idp-mcp/gateway/<id> URI matches the token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idp-mcp-registry
+  namespace: idp-mcp
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idp-mcp-registry
+  namespace: idp-mcp
+data:
+  IDP_REGISTRY_LISTEN: "0.0.0.0:8250"
+  IDP_DEV_MODE: "false"
+  IDP_ADMIN_ISSUER: "https://idp.example.com/realms/idp"            # the IdP that signs admin tokens
+  IDP_ADMIN_AUDIENCE: "idp-mcp-registry"
+  IDP_ADMIN_JWKS_URL: "https://idp.example.com/realms/idp/protocol/openid-connect/certs"
+  IDP_ALLOWED_UPSTREAM_HOSTS: "mcp-a.tools.svc.cluster.local,mcp-b.tools.svc.cluster.local"
+  IDP_PRIVATE_UPSTREAM_HOSTS: "mcp-a.tools.svc.cluster.local,mcp-b.tools.svc.cluster.local"
+  IDP_DEPLOY_TIMEOUT: "60s"
+  IDP_TLS_CERT_FILE: "/etc/idp/tls/tls.crt"
+  IDP_TLS_KEY_FILE: "/etc/idp/tls/tls.key"
+  IDP_GATEWAY_CLIENT_CA_FILE: "/etc/idp/gateway-ca/ca.crt"
+  IDP_UPSTREAM_CA_FILE: "/etc/idp/upstream-ca/ca.crt"
+  IDP_LOG_LEVEL: "info"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idp-mcp-registry
+  namespace: idp-mcp
+  labels:
+    app.kubernetes.io/component: registry
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: registry
+    spec:
+      serviceAccountName: idp-mcp-registry
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: registry
+          image: idp-mcp
+          command: ["/usr/local/bin/registry-service", "serve"]
+          ports:
+            - name: https
+              containerPort: 8250
+          envFrom:
+            - configMapRef:
+                name: idp-mcp-registry
+          env:
+            - name: IDP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: idp-mcp-registry-db
+                  key: service-url            # a login role that is a member of idp_mcp_app, never a superuser
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/idp/tls
+              readOnly: true
+            - name: gateway-ca
+              mountPath: /etc/idp/gateway-ca
+              readOnly: true
+            - name: upstream-ca
+              mountPath: /etc/idp/upstream-ca
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: https
+              scheme: HTTPS
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: https
+              scheme: HTTPS
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tls
+          secret:
+            secretName: idp-mcp-registry-tls      # tls.crt / tls.key, e.g. a cert-manager Certificate
+        - name: gateway-ca
+          secret:
+            secretName: idp-mcp-gateway-ca        # ca.crt: the CA that issues gateway client certificates
+        - name: upstream-ca
+          secret:
+            secretName: idp-mcp-upstream-ca       # ca.crt: CA of the internal MCP servers (https)
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idp-mcp-registry
+  namespace: idp-mcp
+  labels:
+    app.kubernetes.io/component: registry
+spec:
+  selector:
+    app.kubernetes.io/component: registry
+  ports:
+    - name: https
+      port: 8250
+      targetPort: https
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: idp-mcp-registry
+  namespace: idp-mcp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: registry

@@ -124,6 +124,11 @@ func Capabilities(caps map[string]any) []string {
 			out = append(out, release.CapResourcesListChanged)
 		}
 	}
+	if ext, ok := caps["extensions"].(map[string]any); ok {
+		if _, ok := ext[release.TasksExtensionID]; ok {
+			out = append(out, release.CapTasks)
+		}
+	}
 	sort.Strings(out)
 	return out
 }

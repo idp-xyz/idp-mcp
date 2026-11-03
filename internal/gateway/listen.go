@@ -101,6 +101,7 @@ func (g *Gateway) ListenStreams() int {
 type filter struct {
 	Tools, Prompts, Resources bool
 	Subscriptions             []string
+	TaskIDs                   []string // tasks extension: notifications/tasks for these ids
 }
 
 func (f filter) honoured() map[string]any {
@@ -116,6 +117,9 @@ func (f filter) honoured() map[string]any {
 	}
 	if len(f.Subscriptions) > 0 {
 		out["resourceSubscriptions"] = f.Subscriptions
+	}
+	if len(f.TaskIDs) > 0 {
+		out["taskIds"] = f.TaskIDs
 	}
 	return out
 }
@@ -141,6 +145,7 @@ func (g *Gateway) listen(w http.ResponseWriter, r *http.Request, st *state, req 
 			PromptsListChanged    bool     `json:"promptsListChanged"`
 			ResourcesListChanged  bool     `json:"resourcesListChanged"`
 			ResourceSubscriptions []string `json:"resourceSubscriptions"`
+			TaskIDs               []string `json:"taskIds"`
 		} `json:"notifications"`
 	}
 	if err := req.DecodeParams(&p); err != nil {
@@ -180,6 +185,21 @@ func (g *Gateway) listen(w http.ResponseWriter, r *http.Request, st *state, req 
 		}
 		relayTargets[owner].uris = append(relayTargets[owner].uris, uri)
 		f.Subscriptions = append(f.Subscriptions, uri)
+	}
+
+	for _, id := range p.Notifications.TaskIDs {
+		if len(f.TaskIDs) >= 100 {
+			break
+		}
+		b, ok := g.tasks.lookup(id, pr)
+		if !ok || !targetHas(st.doc, b.target, release.CapTasks) || st.router.Endpoint(b.target) == "" {
+			continue
+		}
+		if relayTargets[b.target] == nil {
+			relayTargets[b.target] = &relaySpec{}
+		}
+		relayTargets[b.target].taskIDs = append(relayTargets[b.target].taskIDs, id)
+		f.TaskIDs = append(f.TaskIDs, id)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -263,6 +283,7 @@ func targetHas(d *release.Document, target, capability string) bool {
 type relaySpec struct {
 	listChanged bool
 	uris        []string
+	taskIDs     []string
 }
 
 // relay opens the target's own listen stream and forwards resource notifications for this caller.
@@ -274,9 +295,16 @@ func (g *Gateway) relay(ctx context.Context, st *state, target string, spec *rel
 	if len(spec.uris) > 0 {
 		upFilter["resourceSubscriptions"] = spec.uris
 	}
+	if len(spec.taskIDs) > 0 {
+		upFilter["taskIds"] = spec.taskIDs
+	}
 	subscribed := map[string]bool{}
 	for _, u := range spec.uris {
 		subscribed[u] = true
+	}
+	tasks := map[string]bool{}
+	for _, id := range spec.taskIDs {
+		tasks[id] = true
 	}
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "idp-relay", "method": "subscriptions/listen",
 		"params": map[string]any{"notifications": upFilter, "_meta": st.upstream.Meta()}})
@@ -321,6 +349,10 @@ func (g *Gateway) relay(ctx context.Context, st *state, target string, spec *rel
 				}
 			case "notifications/resources/updated":
 				if uri, _ := msg.Params["uri"].(string); !subscribed[uri] {
+					continue
+				}
+			case "notifications/tasks", "notifications/tasks/status":
+				if id, _ := msg.Params["taskId"].(string); !tasks[id] {
 					continue
 				}
 			default:

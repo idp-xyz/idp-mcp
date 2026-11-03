@@ -118,6 +118,9 @@ func federatedCapabilities(d *release.Document) map[string]any {
 		if t.HasCapability(release.CapCompletions) {
 			caps["completions"] = map[string]any{}
 		}
+		if t.HasCapability(release.CapTasks) {
+			caps["extensions"] = map[string]any{release.TasksExtensionID: map[string]any{}}
+		}
 	}
 	return caps
 }

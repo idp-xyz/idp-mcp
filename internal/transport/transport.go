@@ -102,6 +102,18 @@ func ParseMessage(contentType string, body []byte) (json.RawMessage, error) {
 	}
 }
 
+// SSEMessages returns every JSON "message" event of an event stream body, in order (invalid JSON
+// data is skipped). Used to inspect a relayed stream after it ended.
+func SSEMessages(body []byte) []json.RawMessage {
+	var out []json.RawMessage
+	for _, ev := range parseSSE(body) {
+		if (ev.event == "" || ev.event == "message") && json.Valid([]byte(ev.data)) {
+			out = append(out, json.RawMessage(ev.data))
+		}
+	}
+	return out
+}
+
 type sseEvent struct{ event, data string }
 
 func parseSSE(body []byte) []sseEvent {

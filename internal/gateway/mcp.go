@@ -32,6 +32,9 @@ import (
 // MaxUpstreamJSON bounds a buffered (non-streamed) tools/call response.
 const MaxUpstreamJSON = 16 << 20
 
+// MaxObservedStream bounds the copy of a relayed event stream kept to inspect its final message.
+const MaxObservedStream = 1 << 20
+
 func liveDigest(toolRaws, promptRaws []json.RawMessage) (string, error) {
 	tools, err := federation.NormalizeTools(toolRaws)
 	if err != nil {
@@ -182,6 +185,8 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		g.complete(w, r, st, req, pr)
 	case "subscriptions/listen":
 		g.listen(w, r, st, req, pr)
+	case "tasks/get", "tasks/cancel":
+		g.taskRequest(w, r, st, req, pr)
 	default:
 		transport.WriteError(w, http.StatusNotFound, req.ID, server.MethodNotFound(req.Method))
 	}
@@ -250,16 +255,25 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 	}
 	params := rawParams(req)
 	params["name"], _ = json.Marshal(rt.Tool.Name)
-	outcome := g.forward(w, r, st, req, rt.Endpoint, rt.Tool.Name, params)
+	var observe func(json.RawMessage)
+	if targetHas(st.doc, rt.Target, release.CapTasks) {
+		observe = func(msg json.RawMessage) { g.tasks.bindFromResult(msg, rt.Target, p.Name, pr) }
+	}
+	outcome := g.forward(w, r, st, req, rt.Endpoint, rt.Tool.Name, params, observe)
 	done(invocation.Allow, outcome)
 }
 
 // forward sends the request to the upstream with the given (possibly rewritten) params and relays
 // the answer: JSON is buffered and checked, an event stream is passed through as it arrives. The
 // client's params - _meta, inputResponses, requestState, progress tokens - are forwarded as they
-// are, so multi-round flows (InputRequiredResult) work end to end.
+// are, so multi-round flows (InputRequiredResult) work end to end. observe, if given, sees the
+// final JSON-RPC message (the JSON body, or the last message of a stream that fit in memory).
 func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, endpoint, nameHeader string,
-	params map[string]json.RawMessage) (outcome string) {
+	params map[string]json.RawMessage, observe ...func(json.RawMessage)) (outcome string) {
+	var seen func(json.RawMessage)
+	if len(observe) > 0 {
+		seen = observe[0]
+	}
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "method": req.Method, "params": params})
 	ctx, cancel := context.WithTimeout(r.Context(), g.cfg.CallTimeout)
 	defer cancel()
@@ -310,6 +324,9 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(raw)
+		if seen != nil {
+			seen(raw)
+		}
 		switch {
 		case msg.Error != nil:
 			return invocation.OutcomeRPCError
@@ -323,6 +340,8 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 		w.WriteHeader(resp.StatusCode)
 		rc := http.NewResponseController(w)
 		buf := make([]byte, 32<<10)
+		var tee []byte // bounded copy for observe
+		overflow := false
 		for {
 			n, err := resp.Body.Read(buf)
 			if n > 0 {
@@ -330,8 +349,20 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 					return invocation.OutcomeUnknown
 				}
 				_ = rc.Flush()
+				if seen != nil && !overflow {
+					if len(tee)+n > MaxObservedStream {
+						overflow, tee = true, nil
+					} else {
+						tee = append(tee, buf[:n]...)
+					}
+				}
 			}
 			if err == io.EOF {
+				if seen != nil && !overflow {
+					if msgs := transport.SSEMessages(tee); len(msgs) > 0 {
+						seen(msgs[len(msgs)-1])
+					}
+				}
 				return invocation.OutcomeStreamed
 			}
 			if err != nil {

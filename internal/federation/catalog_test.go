@@ -89,8 +89,9 @@ func TestNormalizeRefusesInvalidCatalogs(t *testing.T) {
 
 func TestCapabilitiesFromDiscovery(t *testing.T) {
 	got := Capabilities(map[string]any{"tools": map[string]any{}, "prompts": map[string]any{"listChanged": true},
-		"resources": map[string]any{"subscribe": true, "listChanged": true}, "logging": map[string]any{}, "completions": map[string]any{}})
-	if strings.Join(got, ",") != "completions,prompts,resources,resources.listChanged,resources.subscribe,tools" {
+		"resources": map[string]any{"subscribe": true, "listChanged": true}, "logging": map[string]any{}, "completions": map[string]any{},
+		"extensions": map[string]any{"io.modelcontextprotocol/tasks": map[string]any{}, "vendor/x": map[string]any{}}})
+	if strings.Join(got, ",") != "completions,prompts,resources,resources.listChanged,resources.subscribe,tasks,tools" {
 		t.Fatal(got)
 	}
 	if got := Capabilities(map[string]any{"tools": map[string]any{}}); strings.Join(got, ",") != "tools" {

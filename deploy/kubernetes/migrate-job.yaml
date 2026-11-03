@@ -1,0 +1,43 @@
+# Schema migrations, run as the schema owner before a new image version is rolled out
+# (`registry-service serve` refuses to start on a schema that is not at the version it needs).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: idp-mcp-migrate
+  namespace: idp-mcp
+  labels:
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: idp-mcp
+          command: ["/usr/local/bin/registry-service", "migrate"]
+          env:
+            - name: IDP_MIGRATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: idp-mcp-registry-db
+                  key: owner-url               # the schema owner; used by this Job only
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

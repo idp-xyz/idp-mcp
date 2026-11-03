@@ -55,8 +55,10 @@ var RequestMethods = map[string]bool{
 // LegacyMethods belong to the pre-2026 stateful handshake and are refused (ADR-0001 D12).
 var LegacyMethods = map[string]bool{"initialize": true, "notifications/initialized": true}
 
-// NamedParam is the params field a request repeats in the Mcp-Name header.
-var NamedParam = map[string]string{"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
+// NamedParam is the params field a request repeats in the Mcp-Name header (tasks: SEP-2243 for the
+// tasks extension, Mcp-Name carries the taskId).
+var NamedParam = map[string]string{"tools/call": "name", "prompts/get": "name", "resources/read": "uri",
+	"tasks/get": "taskId", "tasks/cancel": "taskId"}
 
 // Request is a parsed JSON-RPC request. ID is kept raw so it is echoed back byte for byte.
 type Request struct {
