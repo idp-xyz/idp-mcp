@@ -203,8 +203,16 @@ func TestWorkloadsAreHardenedAndWired(t *testing.T) {
 	}
 	for _, d := range m.byKind["Deployment"] {
 		if str(d, "metadata", "labels", "app.kubernetes.io/component") == "gateway" {
-			if r, _ := get(d, "spec", "replicas").(int); r != 1 || str(d, "spec", "strategy", "type") != "Recreate" {
-				t.Errorf("%s: a gateway record has one attested status; replicas must be 1 with Recreate", name(d))
+			instanceFromPod := false
+			for _, c := range list(podSpec(d), "containers") {
+				for _, e := range list(c, "env") {
+					if str(e, "name") == "IDP_GATEWAY_INSTANCE" && str(e, "valueFrom", "fieldRef", "fieldPath") == "metadata.name" {
+						instanceFromPod = true
+					}
+				}
+			}
+			if !instanceFromPod {
+				t.Errorf("%s: replicas must attest under their pod name (IDP_GATEWAY_INSTANCE from metadata.name)", name(d))
 			}
 		}
 	}

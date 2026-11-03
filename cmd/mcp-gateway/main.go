@@ -3,6 +3,8 @@
 // Configuration (environment):
 //
 //	IDP_GATEWAY_ID             gateway id (required; releases for other gateways are refused)
+//	IDP_GATEWAY_INSTANCE       this replica's id (default: hostname); replicas of one gateway record
+//	                           each attest, and a deployment is GOOD only when all live ones run it
 //	IDP_GATEWAY_LISTEN         listen address (default 127.0.0.1:3220)
 //	IDP_GATEWAY_ALLOWED_HOSTS  extra Host names accepted besides loopback, comma separated
 //	IDP_DEV_MODE               "true" allows loopback upstreams
@@ -13,6 +15,7 @@
 //	IDP_CALL_TIMEOUT           per tools/call (default 60s)
 //	IDP_DRIFT_INTERVAL         catalog drift checks (default 60s)
 //	IDP_LOG_LEVEL              debug | info | warn | error
+//	IDP_METRICS_LISTEN         serve Prometheus metrics (/metrics) on this address; off when unset
 //	IDP_GATEWAY_TLS_CERT_FILE / IDP_GATEWAY_TLS_KEY_FILE   serve /mcp over HTTPS
 //	IDP_REGISTRY_CA_FILE       extra trusted CAs for the registry
 //	IDP_GATEWAY_CLIENT_CERT_FILE / IDP_GATEWAY_CLIENT_KEY_FILE   mutual TLS to the registry
@@ -121,7 +124,11 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("IDP_IDENTITY_CA_FILE: %w", err)
 	}
-	cfg := gateway.Config{GatewayID: id, Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: version},
+	instance := env("IDP_GATEWAY_INSTANCE", "")
+	if instance == "" {
+		instance, _ = os.Hostname()
+	}
+	cfg := gateway.Config{GatewayID: id, InstanceID: instance, Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: version},
 		UpstreamTLS:  upstreamTLS,
 		Tracer:       tp,
 		IdentityHTTP: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: identityTLS}},
@@ -168,6 +175,9 @@ func run(log *slog.Logger) error {
 		go sync.Run(ctx)
 	}
 
+	if ms := observability.ServeMetrics(env("IDP_METRICS_LISTEN", ""), g.Metrics(), log); ms != nil {
+		defer ms.Close()
+	}
 	srv := &http.Server{Addr: env("IDP_GATEWAY_LISTEN", "127.0.0.1:3220"), Handler: g.Handler(),
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
 	if cert := env("IDP_GATEWAY_TLS_CERT_FILE", ""); cert != "" {

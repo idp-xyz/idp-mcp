@@ -107,10 +107,18 @@ func unknownTask(id string) *server.Error {
 	return &server.Error{Code: server.CodeInvalidParams, Message: "Unknown task: " + id, Data: map[string]string{"taskId": id}}
 }
 
-// taskRequest routes tasks/get and tasks/cancel to the target that created the task.
+// taskRequest routes tasks/get, tasks/update and tasks/cancel to the target that created the task.
+// A request whose _meta does not declare the tasks extension is refused with -32021 before any
+// lookup (SEP-2663 capability gating), so a client cannot probe task ids without negotiating.
 func (g *Gateway) taskRequest(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, pr authorization.Principal) {
 	if rej := req.CheckNameHeader(r.Header.Get(server.HeaderName)); rej != nil {
 		transport.WriteRejection(w, rej)
+		return
+	}
+	if !req.ClientExtensions()[release.TasksExtensionID] {
+		transport.WriteError(w, http.StatusBadRequest, req.ID, &server.Error{Code: server.CodeMissingClientCapability,
+			Message: "Missing required client capability: " + release.TasksExtensionID,
+			Data:    map[string]any{"requiredCapabilities": map[string]any{"extensions": map[string]any{release.TasksExtensionID: map[string]any{}}}}})
 		return
 	}
 	var p struct {

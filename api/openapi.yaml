@@ -397,8 +397,18 @@ components:
         jwt: {$ref: '#/components/schemas/JWTProfile'}
         driftAction: {type: string, enum: [block, report]}
         desiredReleaseId: {type: [string, 'null']}
-        lastStatus: {oneOf: [{$ref: '#/components/schemas/GatewayStatus'}, {type: 'null'}]}
+        lastStatus: {oneOf: [{$ref: '#/components/schemas/GatewayStatus'}, {type: 'null'}], description: most recent heartbeat of any instance}
         lastHeartbeatAt: {type: [string, 'null'], format: date-time}
+        instances:
+          type: array
+          description: every replica that has reported; a deployment is GOOD only when all live ones run the release
+          items:
+            type: object
+            properties:
+              instanceId: {type: string}
+              lastHeartbeatAt: {type: string, format: date-time}
+              live: {type: boolean}
+              status: {$ref: '#/components/schemas/GatewayStatus'}
         createdBy: {type: string}
         createdAt: {type: string, format: date-time}
     GatewayStatus:
@@ -406,6 +416,7 @@ components:
       required: [gatewayId, version, checked, targets, invocationsDropped]
       properties:
         gatewayId: {type: string}
+        instanceId: {type: string, description: the reporting replica}
         version: {type: string}
         releaseId: {type: string}
         digest: {type: string}

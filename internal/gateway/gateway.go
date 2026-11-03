@@ -34,16 +34,18 @@ import (
 // Config of a gateway instance.
 type Config struct {
 	GatewayID     string
+	InstanceID    string // this replica (pod name, hostname); several replicas may share a gateway record
 	Info          server.ServerInfo
 	DevMode       bool          // allows loopback upstreams
 	AllowedHosts  []string      // Host header names accepted besides loopback and the JWT resource host
 	CallTimeout   time.Duration // per tools/call
 	DriftInterval time.Duration
 	Recorder      invocation.Recorder
-	Dropped       func() int64         // invocation records lost, reported in Status
-	IdentityHTTP  *http.Client         // JWKS fetches
-	UpstreamTLS   *tls.Config          // extra trusted CAs for https upstreams (optional)
-	Tracer        trace.TracerProvider // optional; default: SDK provider without exporter
+	Dropped       func() int64           // invocation records lost, reported in Status
+	IdentityHTTP  *http.Client           // JWKS fetches
+	UpstreamTLS   *tls.Config            // extra trusted CAs for https upstreams (optional)
+	Tracer        trace.TracerProvider   // optional; default: SDK provider without exporter
+	Metrics       *observability.Metrics // optional; default: a fresh registry (see Metrics())
 	Log           *slog.Logger
 }
 
@@ -68,6 +70,7 @@ type TargetStatus struct {
 // Status is what the gateway attests about itself (ADR-0001 D4).
 type Status struct {
 	GatewayID          string         `json:"gatewayId"`
+	InstanceID         string         `json:"instanceId,omitempty"`
 	Version            string         `json:"version"`
 	ReleaseID          string         `json:"releaseId,omitempty"`
 	Digest             string         `json:"digest,omitempty"`
@@ -143,7 +146,24 @@ type Gateway struct {
 	listeners hub // open subscriptions/listen streams
 	tasks     taskStore
 	tracer    trace.Tracer
+	metrics   *observability.Metrics
 }
+
+// meteredRecorder counts every decision and observes its latency before passing it on.
+type meteredRecorder struct {
+	inner     invocation.Recorder
+	decisions *observability.CounterVec
+	latency   *observability.HistogramVec
+}
+
+func (m *meteredRecorder) Record(r invocation.Record) {
+	m.decisions.Inc(r.Method, r.Decision, r.Outcome)
+	m.latency.Observe(float64(r.LatencyMS)/1000, r.Method)
+	m.inner.Record(r)
+}
+
+// Metrics returns the gateway's metrics registry (served by IDP_METRICS_LISTEN).
+func (g *Gateway) Metrics() *observability.Metrics { return g.metrics }
 
 // New returns a gateway without a release; it answers 503 until one is activated.
 func New(cfg Config) *Gateway {
@@ -165,8 +185,49 @@ func New(cfg Config) *Gateway {
 	if cfg.Tracer == nil {
 		cfg.Tracer = observability.NewTracerProvider(cfg.Info.Name, cfg.Info.Version, nil)
 	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = observability.NewMetrics()
+	}
+	cfg.Recorder = &meteredRecorder{inner: cfg.Recorder,
+		decisions: cfg.Metrics.Counter("idp_mcp_gateway_decisions_total", "Gateway decisions by MCP method, decision and outcome.", "method", "decision", "outcome"),
+		latency:   cfg.Metrics.Histogram("idp_mcp_gateway_decision_duration_seconds", "Latency of decided requests by MCP method.", observability.DurationBuckets, "method")}
 	g := &Gateway{cfg: cfg, checkNow: make(chan struct{}, 1), hosts: map[string]bool{"127.0.0.1": true, "localhost": true, "::1": true},
-		tracer: cfg.Tracer.Tracer("idp-mcp/gateway")}
+		tracer: cfg.Tracer.Tracer("idp-mcp/gateway"), metrics: cfg.Metrics}
+	g.metrics.GaugeFunc("idp_mcp_gateway_listen_streams", "Open subscriptions/listen streams.", nil,
+		func() []observability.LabeledValue {
+			return []observability.LabeledValue{{Value: float64(g.ListenStreams())}}
+		})
+	g.metrics.GaugeFunc("idp_mcp_gateway_task_bindings", "Task ids the gateway can route.", nil,
+		func() []observability.LabeledValue {
+			return []observability.LabeledValue{{Value: float64(g.tasks.Count())}}
+		})
+	g.metrics.GaugeFunc("idp_mcp_gateway_invocations_dropped_total", "Invocation records lost to a full buffer.", nil,
+		func() []observability.LabeledValue {
+			if cfg.Dropped == nil {
+				return nil
+			}
+			return []observability.LabeledValue{{Value: float64(cfg.Dropped())}}
+		})
+	g.metrics.GaugeFunc("idp_mcp_gateway_target_up", "1 when the target's live catalog matches the approved snapshot.", []string{"target", "status"},
+		func() []observability.LabeledValue {
+			var out []observability.LabeledValue
+			for _, t := range g.Status().Targets {
+				v := 0.0
+				if t.Status == TargetOK {
+					v = 1
+				}
+				out = append(out, observability.LabeledValue{Labels: []string{t.Name, t.Status}, Value: v})
+			}
+			return out
+		})
+	g.metrics.GaugeFunc("idp_mcp_gateway_release_info", "The running release (always 1).", []string{"release", "digest"},
+		func() []observability.LabeledValue {
+			s := g.Status()
+			if s.Digest == "" {
+				return nil
+			}
+			return []observability.LabeledValue{{Labels: []string{s.ReleaseID, s.Digest}, Value: 1}}
+		})
 	for _, h := range cfg.AllowedHosts {
 		g.hosts[h] = true
 	}
@@ -260,7 +321,7 @@ func (g *Gateway) RecordError(err error) { g.lastError.Store(err.Error()) }
 // Status reports the running release and target health.
 func (g *Gateway) Status() Status {
 	refused := g.refused.Load().([2]string)
-	s := Status{GatewayID: g.cfg.GatewayID, Version: g.cfg.Info.Version, Targets: []TargetStatus{}, LastError: g.lastError.Load().(string),
+	s := Status{GatewayID: g.cfg.GatewayID, InstanceID: g.cfg.InstanceID, Version: g.cfg.Info.Version, Targets: []TargetStatus{}, LastError: g.lastError.Load().(string),
 		RefusedDigest: refused[0], RefusedReason: refused[1]}
 	if g.cfg.Dropped != nil {
 		s.InvocationsDropped = g.cfg.Dropped()

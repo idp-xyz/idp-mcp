@@ -49,7 +49,7 @@ var RequestMethods = map[string]bool{
 	"resources/list": true, "resources/read": true, "resources/templates/list": true,
 	"resources/subscribe": true, "resources/unsubscribe": true,
 	"prompts/list": true, "prompts/get": true, "completion/complete": true, "logging/setLevel": true,
-	"subscriptions/listen": true, "tasks/get": true, "tasks/list": true, "tasks/cancel": true, "tasks/result": true,
+	"subscriptions/listen": true, "tasks/get": true, "tasks/list": true, "tasks/cancel": true, "tasks/result": true, "tasks/update": true,
 }
 
 // LegacyMethods belong to the pre-2026 stateful handshake and are refused (ADR-0001 D12).
@@ -58,7 +58,28 @@ var LegacyMethods = map[string]bool{"initialize": true, "notifications/initializ
 // NamedParam is the params field a request repeats in the Mcp-Name header (tasks: SEP-2243 for the
 // tasks extension, Mcp-Name carries the taskId).
 var NamedParam = map[string]string{"tools/call": "name", "prompts/get": "name", "resources/read": "uri",
-	"tasks/get": "taskId", "tasks/cancel": "taskId"}
+	"tasks/get": "taskId", "tasks/cancel": "taskId", "tasks/update": "taskId"}
+
+// CodeMissingClientCapability: the request needs a client capability (or extension) the request's
+// _meta.clientCapabilities did not declare (SEP-2575).
+const CodeMissingClientCapability = -32021
+
+// ClientExtensions returns the extension ids declared in a request's _meta.clientCapabilities.
+func (r *Request) ClientExtensions() map[string]bool {
+	var p struct {
+		Meta struct {
+			Caps struct {
+				Extensions map[string]json.RawMessage `json:"extensions"`
+			} `json:"io.modelcontextprotocol/clientCapabilities"`
+		} `json:"_meta"`
+	}
+	_ = json.Unmarshal(r.Params, &p)
+	out := map[string]bool{}
+	for k := range p.Meta.Caps.Extensions {
+		out[k] = true
+	}
+	return out
+}
 
 // Request is a parsed JSON-RPC request. ID is kept raw so it is echoed back byte for byte.
 type Request struct {

@@ -85,7 +85,7 @@ func newTasksUpstream(t *testing.T) *tasksUpstream {
 				return
 			}
 			res(fmt.Sprintf(`{"resultType":"complete","taskId":%q,"status":"completed","createdAt":"2026-11-03T00:00:00Z","lastUpdatedAt":"2026-11-03T00:00:01Z","ttlMs":%d,"result":{"content":[{"type":"text","text":"done"}]}}`, taskID, u.ttlMs))
-		case "tasks/cancel":
+		case "tasks/cancel", "tasks/update":
 			u.mu.Lock()
 			known := u.tasks[taskID]
 			u.mu.Unlock()
@@ -158,7 +158,9 @@ func tasksHarness(t *testing.T, u *tasksUpstream) *harness {
 	return &harness{g: g, rec: rec, srv: srv}
 }
 
-func taskParams(id string) string { return `{"taskId":"` + id + `",` + metaJSON + `}` }
+const tasksMeta = `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}`
+
+func taskParams(id string) string { return `{"taskId":"` + id + `",` + tasksMeta + `}` }
 
 func TestDiscoverAdvertisesTheTasksExtensionOnlyWhenATargetOffersIt(t *testing.T) {
 	h := tasksHarness(t, newTasksUpstream(t))
@@ -207,6 +209,14 @@ func TestTasksAreRoutedToTheirCreatorForTheirOwnerOnly(t *testing.T) {
 	}
 	if rec := h.rec.last(); rec.Decision != invocation.Deny || rec.Outcome != invocation.OutcomeDenied {
 		t.Fatalf("%+v", rec)
+	}
+	// without the extension in _meta the surface is gated with -32021, before any lookup
+	if r := h.rpc(t, operatorKey, "tasks/get", `{"taskId":"task-1",`+metaJSON+`}`, map[string]string{server.HeaderName: "task-1"}); r.status != 400 || errCode(r) != server.CodeMissingClientCapability || !strings.Contains(r.raw, "requiredCapabilities") {
+		t.Fatalf("ungated: %d %s", r.status, r.raw)
+	}
+	// tasks/update is routed like tasks/get (the upstream answers the ack)
+	if r := h.rpc(t, operatorKey, "tasks/update", `{"taskId":"task-1","inputResponses":{},`+tasksMeta+`}`, map[string]string{server.HeaderName: "task-1"}); r.status != 200 || errCode(r) != 0 || u.count("tasks/update task-1") != 1 {
+		t.Fatalf("update: %d %s", r.status, r.raw)
 	}
 	// cancel: empty ack; removed v1 methods stay -32601; routing header must match
 	r = h.rpc(t, operatorKey, "tasks/cancel", taskParams("task-1"), map[string]string{server.HeaderName: "task-1"})

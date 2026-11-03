@@ -158,13 +158,14 @@ func richRelease(t *testing.T, naming string, ups ...*richUpstream) *release.Env
 }
 
 func richHarness(t *testing.T, env *release.Envelope) *harness {
-	g := New(Config{GatewayID: "g1", Info: server.ServerInfo{Name: "gw", Version: "t"}, DevMode: true, CallTimeout: 2 * time.Second, Recorder: &recorder{}})
+	rec := &recorder{}
+	g := New(Config{GatewayID: "g1", Info: server.ServerInfo{Name: "gw", Version: "t"}, DevMode: true, CallTimeout: 2 * time.Second, Recorder: rec})
 	if err := g.Activate(env); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(g.Handler())
 	t.Cleanup(srv.Close)
-	return &harness{g: g, srv: srv, rec: g.cfg.Recorder.(*recorder)}
+	return &harness{g: g, srv: srv, rec: rec}
 }
 
 func names(r reply, field, key string) []string {

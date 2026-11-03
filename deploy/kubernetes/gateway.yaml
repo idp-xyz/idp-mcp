@@ -1,7 +1,6 @@
-# mcp-gateway: the data plane. ONE REPLICA PER GATEWAY RECORD: the registry attests one status per
-# gateway id, so a second replica sharing the id and credential would overwrite the first one's
-# heartbeat. Scale horizontally by creating further gateway records (one Deployment each, behind a
-# shared Service or Ingress) - see deploy/kubernetes/README.md.
+# mcp-gateway: the data plane. Replicas share the gateway record and credential; each attests under
+# its pod name (IDP_GATEWAY_INSTANCE), and a deployment is GOOD only when every live replica runs the
+# release - see deploy/kubernetes/README.md.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -41,9 +40,10 @@ metadata:
     app.kubernetes.io/component: gateway
     idp-mcp/gateway: edge-1
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
-    type: Recreate     # the record has one attested status; no two replicas at once
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
   selector:
     matchLabels:
       app.kubernetes.io/component: gateway
@@ -78,6 +78,10 @@ spec:
                 secretKeyRef:
                   name: idp-mcp-gateway-edge-1
                   key: gateway-id
+            - name: IDP_GATEWAY_INSTANCE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           volumeMounts:
             - name: credential
               mountPath: /etc/idp/credential

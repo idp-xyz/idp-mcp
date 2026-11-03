@@ -20,6 +20,8 @@
 //	IDP_ALLOWED_UPSTREAM_HOSTS   hosts MCP servers may be registered on, comma separated
 //	IDP_PRIVATE_UPSTREAM_HOSTS   of those, the ones that may resolve to private addresses
 //	IDP_DEPLOY_TIMEOUT           how long a deployment waits for the gateway's attestation (30s)
+//	IDP_INSTANCE_STALE_AFTER     a gateway instance silent for longer no longer counts (30s)
+//	IDP_METRICS_LISTEN           serve Prometheus metrics (/metrics) on this address; off when unset
 //	IDP_TLS_CERT_FILE / IDP_TLS_KEY_FILE   serve HTTPS
 //	IDP_GATEWAY_CLIENT_CA_FILE   require mutual TLS on /internal/v1: a client certificate from this CA
 //	                             whose spiffe://idp-mcp/gateway/<id> URI matches the gateway credential
@@ -188,13 +190,20 @@ func serve(log *slog.Logger) error {
 		return fmt.Errorf("IDP_DEPLOY_TIMEOUT: %w", err)
 	}
 	pol := &policy.Upstream{AllowedHosts: hostSet("IDP_ALLOWED_UPSTREAM_HOSTS"), PrivateHosts: hostSet("IDP_PRIVATE_UPSTREAM_HOSTS"), DevMode: dev}
-	svc := &registry.Service{Store: store, Policy: pol, DeployTimeout: deployTimeout, PollEvery: 250 * time.Millisecond, Log: log,
+	staleAfter, err := time.ParseDuration(env("IDP_INSTANCE_STALE_AFTER", "30s"))
+	if err != nil {
+		return fmt.Errorf("IDP_INSTANCE_STALE_AFTER: %w", err)
+	}
+	svc := &registry.Service{Store: store, Policy: pol, DeployTimeout: deployTimeout, PollEvery: 250 * time.Millisecond, StaleAfter: staleAfter, Log: log,
 		Upstream: &client.Client{HTTP: client.NewHTTPClient(pol, 15*time.Second, upstreamTLS), Info: server.ServerInfo{Name: "idp-mcp-registry", Version: version}}}
 	certFile, keyFile, clientCA := env("IDP_TLS_CERT_FILE", ""), env("IDP_TLS_KEY_FILE", ""), env("IDP_GATEWAY_CLIENT_CA_FILE", "")
 	if clientCA != "" && certFile == "" {
 		return errors.New("IDP_GATEWAY_CLIENT_CA_FILE needs IDP_TLS_CERT_FILE and IDP_TLS_KEY_FILE")
 	}
-	api := &registry.API{Svc: svc, Admin: admin, Log: log, RequireGatewayCert: clientCA != ""}
+	api := &registry.API{Svc: svc, Admin: admin, Log: log, RequireGatewayCert: clientCA != "", Metrics: observability.NewMetrics()}
+	if ms := observability.ServeMetrics(env("IDP_METRICS_LISTEN", ""), api.Metrics, log); ms != nil {
+		defer ms.Close()
+	}
 	srv := &http.Server{Addr: env("IDP_REGISTRY_LISTEN", "127.0.0.1:8250"), Handler: observability.HTTPMiddleware(tp, "idp-mcp/registry", api.Handler()),
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 120 * time.Second}
 	if certFile != "" {

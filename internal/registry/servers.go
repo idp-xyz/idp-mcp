@@ -29,7 +29,17 @@ type Service struct {
 	Upstream      *client.Client
 	DeployTimeout time.Duration
 	PollEvery     time.Duration
-	Log           *slog.Logger
+	// StaleAfter: an instance whose last heartbeat is older than this no longer counts for
+	// attestation (default 30s); instances silent for a day are forgotten.
+	StaleAfter time.Duration
+	Log        *slog.Logger
+}
+
+func (s *Service) staleAfter() time.Duration {
+	if s.StaleAfter > 0 {
+		return s.StaleAfter
+	}
+	return 30 * time.Second
 }
 
 var roleRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)

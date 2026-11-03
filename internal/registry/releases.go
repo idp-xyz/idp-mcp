@@ -62,7 +62,33 @@ func getGateway(ctx context.Context, tx pgx.Tx, id string, lock bool) (*Gateway,
 	if lock {
 		q += ` FOR UPDATE`
 	}
-	return scanGateway(tx.QueryRow(ctx, q, id))
+	g, err := scanGateway(tx.QueryRow(ctx, q, id))
+	if err != nil {
+		return nil, err
+	}
+	g.Instances, err = loadInstances(ctx, tx, id, 0)
+	return g, err
+}
+
+// loadInstances lists a gateway's instances; staleAfter > 0 marks liveness.
+func loadInstances(ctx context.Context, tx pgx.Tx, gatewayID string, staleAfter time.Duration) ([]Instance, error) {
+	rows, err := tx.Query(ctx, `SELECT instance_id, status, last_heartbeat_at FROM gateway_instances WHERE gateway_id = $1 ORDER BY instance_id`, gatewayID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Instance{}
+	for rows.Next() {
+		var in Instance
+		var raw []byte
+		if err := rows.Scan(&in.InstanceID, &raw, &in.LastHeartbeatAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(raw, &in.Status)
+		in.Live = staleAfter > 0 && time.Since(in.LastHeartbeatAt) < staleAfter
+		out = append(out, in)
+	}
+	return out, rows.Err()
 }
 
 func absURL(v string) bool {
@@ -136,7 +162,10 @@ func (s *Service) CreateGateway(ctx context.Context, p Principal, in GatewayInpu
 func (s *Service) GetGateway(ctx context.Context, p Principal, id string) (*Gateway, error) {
 	var out *Gateway
 	err := s.Store.InTenant(ctx, p.Tenant, func(tx pgx.Tx) (err error) {
-		out, err = getGateway(ctx, tx, id, false)
+		if out, err = getGateway(ctx, tx, id, false); err != nil {
+			return err
+		}
+		out.Instances, err = loadInstances(ctx, tx, id, s.staleAfter())
 		return err
 	})
 	return out, err
@@ -534,35 +563,62 @@ func (s *Service) Deploy(ctx context.Context, p Principal, id string) (*DeployRe
 	return res, nil
 }
 
+// awaitAttestation waits until every live instance of the gateway (heartbeat within StaleAfter and
+// after the deployment started) runs digest with all targets OK. One refusing instance fails the
+// deployment at once; a lagging one fails it at the deadline, naming the instance. The returned
+// status is that of the newest heartbeat.
 func (s *Service) awaitAttestation(ctx context.Context, tenant, gatewayID, digest string, since time.Time) (*GatewayStatus, string) {
 	deadline := time.Now().Add(s.DeployTimeout)
 	var last *GatewayStatus
+	var lastAt time.Time
+	var pending string
 	for {
-		var g *Gateway
+		var instances []Instance
 		err := s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) (err error) {
-			g, err = getGateway(ctx, tx, gatewayID, false)
+			instances, err = loadInstances(ctx, tx, gatewayID, s.staleAfter())
 			return err
 		})
-		if err == nil && g.LastStatus != nil && g.LastHeartbeatAt != nil && g.LastHeartbeatAt.After(since) {
-			last = g.LastStatus
-			if last.Digest == digest && last.Checked {
-				var bad []string
-				for _, t := range last.Targets {
-					if t.Status != "OK" {
-						bad = append(bad, t.Name+"="+t.Status)
+		if err == nil {
+			var fresh []Instance // live and heard since the deployment started
+			for _, in := range instances {
+				if in.Live && in.LastHeartbeatAt.After(since) {
+					fresh = append(fresh, in)
+					if in.LastHeartbeatAt.After(lastAt) {
+						st := in.Status
+						last, lastAt = &st, in.LastHeartbeatAt
 					}
 				}
+			}
+			var notYet, bad []string
+			for _, in := range fresh {
+				st := in.Status
+				if st.Digest != digest && st.RefusedDigest == digest {
+					return &st, fmt.Sprintf("instance %s refused the release: %s", in.InstanceID, st.RefusedReason)
+				}
+				if st.Digest != digest || !st.Checked {
+					notYet = append(notYet, in.InstanceID)
+					continue
+				}
+				for _, t := range st.Targets {
+					if t.Status != "OK" {
+						bad = append(bad, in.InstanceID+":"+t.Name+"="+t.Status)
+					}
+				}
+			}
+			if len(fresh) > 0 && len(notYet) == 0 {
 				if len(bad) == 0 {
 					return last, ""
 				}
 				return last, "targets not healthy: " + strings.Join(bad, ", ")
 			}
-			if last.Digest != digest && last.RefusedDigest == digest {
-				return last, "gateway refused the release: " + last.RefusedReason
+			if len(fresh) == 0 {
+				pending = "no live instance has reported since the deployment started"
+			} else {
+				pending = fmt.Sprintf("%d of %d live instances not yet on the release: %s", len(notYet), len(fresh), strings.Join(notYet, ", "))
 			}
 		}
 		if time.Now().After(deadline) {
-			return last, fmt.Sprintf("no attestation within %s", s.DeployTimeout)
+			return last, fmt.Sprintf("no attestation within %s (%s)", s.DeployTimeout, pending)
 		}
 		select {
 		case <-ctx.Done():
@@ -595,8 +651,21 @@ func (s *Service) Heartbeat(ctx context.Context, gatewayID, tenant string, st Ga
 	if st.GatewayID != gatewayID {
 		return fail(http.StatusBadRequest, "heartbeat for another gateway")
 	}
+	if st.InstanceID == "" {
+		st.InstanceID = "default"
+	}
+	if len(st.InstanceID) > 253 {
+		return fail(http.StatusBadRequest, "instanceId too long")
+	}
 	raw, _ := json.Marshal(st)
 	return s.Store.InTenant(ctx, tenant, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO gateway_instances (gateway_id, instance_id, tenant_id, status, last_heartbeat_at) VALUES ($1, $2, $3, $4, now())
+			ON CONFLICT (gateway_id, instance_id) DO UPDATE SET status = EXCLUDED.status, last_heartbeat_at = now()`, gatewayID, st.InstanceID, tenant, raw); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM gateway_instances WHERE gateway_id = $1 AND last_heartbeat_at < now() - interval '1 day'`, gatewayID); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx, `UPDATE gateways SET last_status = $2, last_heartbeat_at = now() WHERE id = $1`, gatewayID, raw)
 		return err
 	})

@@ -7,7 +7,7 @@
 | 对象 | 说明 |
 |---|---|
 | `idp-mcp-registry` Deployment（2 副本）+ Service `:8250` | 控制面。HTTPS；`/internal/v1` 另要求网关的客户端证书（mTLS），证书的 URI SAN `spiffe://idp-mcp/gateway/<gateway id>` 必须与凭据对应的网关一致 |
-| `idp-mcp-gateway-edge-1` Deployment（**1 副本**）+ Service `:3220` | 数据面。注册服务按网关 id 记录一份自证状态，两个副本共用一个 id 会互相覆盖心跳；要横向扩展就再建一个网关记录（一个 Deployment），放在同一个 Ingress 之后 |
+| `idp-mcp-gateway-edge-1` Deployment（2 副本，可加）+ Service `:3220` | 数据面。副本共用网关记录和凭据，各自以 Pod 名自证；部署只有在所有存活副本都运行该 Release 时才判 GOOD，滚动更新期间新旧副本并存会让部署等待 |
 | `idp-mcp-migrate` Job | 以 schema 所有者运行迁移；注册服务启动时检查 schema 版本，不匹配就拒绝启动，所以先跑 Job 再滚动更新 |
 | NetworkPolicy | 默认拒绝，再逐条放行：网关 ↔ 注册服务、注册服务 → PostgreSQL、二者 → 上游 MCP 服务器（命名空间标签 `idp-mcp/mcp-upstream=true`）、二者 → IdP 的 JWKS、二者 → 采集器。网关入口只开放 3220，来自标签 `idp-mcp/mcp-clients=true` 的命名空间或 ingress 命名空间；metadata 地址没有任何放行 |
 | Secrets（`secrets.example.yaml`） | 数据库连接、证书、网关 id 与凭据。只是占位，用你的密钥管理创建；不在 kustomization 里 |
@@ -23,5 +23,4 @@
 ## 已知限制
 
 - 没有集群实测，`kubeconform` 之类的 schema 校验也没有运行（参考主机上安装第三方二进制被拒绝）；`tests/deploy` 只检查清单之间的一致性与加固项。
-- 一个网关记录一个副本。
 - NetworkPolicy 中 IdP 和 PostgreSQL 的选择器是示例，要按实际部署改。

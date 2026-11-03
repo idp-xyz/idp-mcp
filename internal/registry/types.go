@@ -132,8 +132,9 @@ type Gateway struct {
 	JWT              *JWTProfile    `json:"jwt,omitempty"`
 	DriftAction      string         `json:"driftAction"`
 	DesiredReleaseID *string        `json:"desiredReleaseId"`
-	LastStatus       *GatewayStatus `json:"lastStatus"`
+	LastStatus       *GatewayStatus `json:"lastStatus"` // most recent heartbeat of any instance
 	LastHeartbeatAt  *time.Time     `json:"lastHeartbeatAt"`
+	Instances        []Instance     `json:"instances"` // every replica that has reported, with freshness
 	CreatedBy        string         `json:"createdBy"`
 	CreatedAt        time.Time      `json:"createdAt"`
 }
@@ -148,9 +149,18 @@ type JWTProfile struct {
 	RolesClaim           string   `json:"rolesClaim"`
 }
 
+// Instance is one replica of a gateway record.
+type Instance struct {
+	InstanceID      string        `json:"instanceId"`
+	LastHeartbeatAt time.Time     `json:"lastHeartbeatAt"`
+	Live            bool          `json:"live"` // heartbeat within the staleness window
+	Status          GatewayStatus `json:"status"`
+}
+
 // GatewayStatus mirrors gateway.Status as reported in heartbeats.
 type GatewayStatus struct {
 	GatewayID          string         `json:"gatewayId"`
+	InstanceID         string         `json:"instanceId,omitempty"`
 	Version            string         `json:"version"`
 	ReleaseID          string         `json:"releaseId,omitempty"`
 	Digest             string         `json:"digest,omitempty"`

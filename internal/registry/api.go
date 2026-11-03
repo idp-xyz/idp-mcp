@@ -12,6 +12,7 @@ import (
 
 	"idp-mcp/adapters/identity"
 	"idp-mcp/internal/gateway"
+	"idp-mcp/internal/observability"
 	"idp-mcp/internal/transport"
 )
 
@@ -29,6 +30,14 @@ type API struct {
 	// RequireGatewayCert binds gateway credentials to mutual TLS: the internal API then also needs a
 	// verified client certificate whose spiffe://idp-mcp/gateway/<id> URI names the token's gateway.
 	RequireGatewayCert bool
+	Metrics            *observability.Metrics // optional; default: a fresh registry
+}
+
+func (a *API) metrics() *observability.Metrics {
+	if a.Metrics == nil {
+		a.Metrics = observability.NewMetrics()
+	}
+	return a.Metrics
 }
 
 type adminHandler func(r *http.Request, p Principal) (int, any, error)
@@ -96,7 +105,7 @@ func (a *API) Handler() http.Handler {
 	m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		transport.WriteJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 	})
-	return m
+	return observability.HTTPMetrics(a.metrics(), "idp_mcp_registry", m)
 }
 
 func (a *API) routes(handle func(pattern string, h http.HandlerFunc)) {
@@ -186,8 +195,12 @@ func (a *API) routes(handle func(pattern string, h http.HandlerFunc)) {
 	}))
 	m.HandleFunc("POST /api/v1/releases/{id}/deploy", func(w http.ResponseWriter, r *http.Request) {
 		// a failed deployment still returns the attestation it was judged on
+		deployments := a.metrics().Counter("idp_mcp_registry_deployments_total", "Deployments by result.", "result")
 		a.admin(func(r *http.Request, p Principal) (int, any, error) {
 			res, err := a.Svc.Deploy(r.Context(), p, r.PathValue("id"))
+			if res != nil && res.Release != nil {
+				deployments.Inc(res.Release.Status)
+			}
 			if err != nil && res != nil {
 				return StatusOf(err), map[string]any{"error": err.Error(), "result": res}, nil
 			}

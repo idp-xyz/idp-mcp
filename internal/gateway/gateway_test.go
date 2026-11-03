@@ -560,3 +560,32 @@ func TestSpansCoverTheRequestAndTheUpstreamCall(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsCountDecisionsWithoutLeakingIdentities(t *testing.T) {
+	h := newHarness(t, "block")
+	h.rpc(t, operatorKey, "tools/call", call("minimal__echo", `{"text":"x"}`), map[string]string{server.HeaderName: "minimal__echo"})
+	h.rpc(t, viewerKey, "tools/call", call("minimal__echo", `{"text":"x"}`), map[string]string{server.HeaderName: "minimal__echo"})
+	h.rpc(t, "", "tools/list", "", nil)
+	var b strings.Builder
+	h.g.Metrics().Write(&b)
+	out := b.String()
+	for _, want := range []string{
+		`idp_mcp_gateway_decisions_total{method="tools/call",decision="ALLOW",outcome="OK"} 1`,
+		`idp_mcp_gateway_decisions_total{method="tools/call",decision="DENY",outcome="DENIED"} 1`,
+		`idp_mcp_gateway_http_requests_total{route="POST /mcp",status="200"} 2`,
+		`idp_mcp_gateway_http_requests_total{route="POST /mcp",status="401"} 1`,
+		`idp_mcp_gateway_decision_duration_seconds_count{method="tools/call"} 2`,
+		`idp_mcp_gateway_release_info{release="r1",digest="sha256:`,
+		`idp_mcp_gateway_target_up{target="minimal",status="`,
+		"idp_mcp_gateway_listen_streams 0\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	for _, leak := range []string{operatorKey, viewerKey, "svc-operator", "svc-viewer", `"text"`} {
+		if strings.Contains(out, leak) {
+			t.Errorf("metrics expose %q", leak)
+		}
+	}
+}

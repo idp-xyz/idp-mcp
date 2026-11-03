@@ -79,7 +79,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		transport.WriteJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 	})
-	return mux
+	return observability.HTTPMetrics(g.metrics, "idp_mcp_gateway", mux)
 }
 
 // clientFacing applies DNS-rebinding defenses: a single Host that names an accepted host, and an
@@ -193,7 +193,7 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		g.complete(w, r, st, req, pr)
 	case "subscriptions/listen":
 		g.listen(w, r, st, req, pr)
-	case "tasks/get", "tasks/cancel":
+	case "tasks/get", "tasks/cancel", "tasks/update":
 		g.taskRequest(w, r, st, req, pr)
 	default:
 		transport.WriteError(w, http.StatusNotFound, req.ID, server.MethodNotFound(req.Method))
