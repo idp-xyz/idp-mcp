@@ -133,3 +133,33 @@ Python 版由 FastAPI 控制面、Python 写的 Modern Boundary 和 agentgateway
 - 与 Keycloak 联调用的是 `start-dev`（H2、无 TLS），令牌都是 client_credentials 签发的。没有测试用户授权码流程、RFC 8693 委派换发，也没有测试 JWKS 轮换（轮换只有单元测试）。
 - 参数校验不覆盖 `inputResponses` 和 `requestState`（它们由上游 SDK 校验，官方场景也是这样要求的）；`outputSchema` 不校验上游的返回。
 - resources 仍是实时透传，不钉住（资源本身是数据，不是能力定义）。
+
+## 9. M4：生产前提（2026-11-03，WSL 实测）
+
+分支 `m4-remaining`，五次提交：OpenAPI；TLS/mTLS；`subscriptions/listen`；OpenTelemetry；tasks 扩展与 Kubernetes 清单。
+
+**新增决策**
+
+| # | 决策 | 理由 |
+|---|---|---|
+| D26 | **`api/openapi.yaml` 与路由器由测试保持一致**：`API.Routes()` 列出实际路由，测试要求文档恰好覆盖这些路由、YAML 可解析、所有 `$ref` 可解析 | 文档漂移和代码漂移一样是缺陷 |
+| D27 | **网关凭据绑定到客户端证书**（`IDP_GATEWAY_CLIENT_CA_FILE`）：开启后 `/internal/v1` 要求 mTLS，证书的 URI SAN `spiffe://idp-mcp/gateway/<id>` 必须等于令牌所属的网关；管理 API 同一监听器上不要求客户端证书 | 凭据泄露后单独不可用；一个监听器同时服务两类客户端，无需第二个端口 |
+| D28 | **自定义 CA 按用途分开配置**：注册服务/网关、上游 MCP 服务器、JWKS 端点、OTLP 采集器各一个；TLS 1.2 起 | 内网 https 常用私有 CA，但不应把一个 CA 信任到所有出口 |
+| D29 | **`subscriptions/listen`（SEP-2575）**：首帧 `notifications/subscriptions/acknowledged` 回显网关实际承诺的过滤器；每个通知的 `_meta` 带订阅 id。`tools`/`prompts` 的列表变化由网关在**激活新 Release 时**发出（目录是钉住的，上游自己改目录是漂移，不是列表变化）；`resources` 的列表变化、资源更新和 task 通知从拥有它们的目标中继，按调用者的授权和归属过滤后重新打标。**流不超过凭据的寿命**：JWT 到期即以最终结果结束；新 Release 不再认证该调用者时也结束。每网关最多 1000 条流 | 把订阅做成联邦的同时不扩大任何权限 |
+| D30 | **`ping` 之外，所有 2026-07-28 删除的方法返回 404/-32601**，包括 `resources/subscribe`、`tasks/list`、`tasks/result` | 与官方套件一致 |
+| D31 | **OpenTelemetry 只用 SDK，OTLP/HTTP JSON 导出器自写**（约 150 行），不引入 gRPC 和 protobuf；W3C Trace Context 传播；每个 MCP 请求一个 server span，每次上游调用一个 client span，注册服务按路由命名 span；span 属性只有方法、工具名、目标、判定、结果，**不含参数、令牌和主体**；没有配置端点时仍生成 span（trace id 用于关联审计记录），不导出 | 供应链小；scratch 镜像仍约 27 MB；隐私边界与调用记录一致 |
+| D32 | **tasks 扩展（SEP-2663 v2）按"谁创建谁可用"路由**：`tools/call` 返回 `resultType:"task"` 时网关记住 taskId → 目标、租户、主体、工具、到期时间（`ttlMs`，上限 7 天，null 记 24 小时，总数上限 10 万）；`tasks/get`/`tasks/cancel` 只对创建者路由，其他人和不存在的 id 得到完全相同的 -32602；两个目标签发同一个 id 时该 id 视为不存在（fail closed）；流式响应也会被检查（最多缓存 1 MiB）；漂移封锁不影响已创建任务的读取与取消 | task id 由上游指定、不可改写，所以归属只能由网关记录；不记录归属就会让任何人读到别人的任务结果 |
+| D33 | **Kubernetes：一个网关记录一个副本**（Deployment `replicas: 1`、`Recreate`）；横向扩展等于多个网关记录；NetworkPolicy 默认拒绝，再逐条放行；清单由 `tests/deploy` 做一致性检查 | 注册服务按网关 id 保存一份自证状态，共享 id 的副本会互相覆盖心跳 |
+
+**结果**
+- 完整矩阵在最终代码上重跑：单元（`-race`）通过；集成测试通过（新增 `TestTLSEverywhere`：管理 API 经 TLS、网关与注册服务经 mTLS 且证书绑定凭据、私有 CA 的 https 上游、https 数据面）；官方符合性 **37/37**，其中 `subscriptions/listen` 的三项检查由原来"不适用"变为 SUCCESS，两项"上游列表变化应通知"的 SHOULD 检查为 WARNING（见局限）；compose 端到端 API Key 模式 **13/13**、Keycloak 模式 **17/17**。
+- 变异检查：去掉内部接口的证书绑定、去掉 task 的归属判定、把清单的只读根文件系统改成可写并挪动一个挂载路径，相应测试都失败。
+- 实测发现：Go 客户端不会向服务器出示 CA 不在服务器"可接受 CA 列表"里的证书，所以"外部 CA 签发的证书"这条测试要强制出示才能验证握手被拒绝；OTel 的 `trace.TraceID` 是数组类型，没有 `Bytes()`。
+
+**局限（不标 PASS）**
+- Kubernetes 清单**没有在集群上应用过**；参考主机没有集群，安装 kubeconform 这类第三方二进制也被拒绝，只做了清单之间的一致性检查（标签/选择器、Secret 与 ConfigMap 引用、`*_FILE` 设置必须落在挂载卷内、加固项、NetworkPolicy 形态）。
+- 官方套件中"上游改了工具列表应通知订阅者"两项为 WARNING：网关按设计不转发上游的列表变化（那是漂移），只在激活新 Release 时通知。这是有意的偏离，不是遗漏。
+- tasks 扩展没有真实上游可测：夹具中的 Everything Server 不实现该扩展，官方的 tasks 场景也属于扩展（不在冻结的 37 项内），只有自写夹具的单元测试；`notifications/tasks` 的订阅过滤键 `taskIds` 按 SDK 注释实现，套件本身标注该场景待重写。
+- 一个网关记录一个副本；多副本的自证状态合并尚未设计。
+- 没有指标（metrics）导出；调用记录和 span 已包含判定、结果和时延，聚合在采集器一侧完成。
+- 用户授权码流程和 RFC 8693 委派换发仍只在 IdP 侧，网关只校验令牌；生产 Keycloak（TLS、用户登录）未联调。
