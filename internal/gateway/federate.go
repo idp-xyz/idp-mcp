@@ -17,6 +17,9 @@ import (
 	"idp-mcp/internal/release"
 	"idp-mcp/internal/server"
 	"idp-mcp/internal/transport"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Prompts are pinned like tools (M3): prompts/list is served from the release and prompts/get is
@@ -216,12 +219,15 @@ func (g *Gateway) promptOwner(st *state, pr authorization.Principal, exposed str
 	return rt.Target, rt.Prompt.Name, true
 }
 
-func (g *Gateway) recorder(st *state, pr authorization.Principal, req *server.Request, name string, tc observability.TraceContext) func(target, decision, outcome string) {
+func (g *Gateway) recorder(r *http.Request, st *state, pr authorization.Principal, req *server.Request, name string) func(target, decision, outcome string) {
 	start := time.Now()
+	span := trace.SpanFromContext(r.Context())
+	span.SetAttributes(attribute.String("mcp.name", name))
 	rec := invocation.Record{At: start.UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject, AuthMethod: pr.Method,
-		Method: req.Method, Tool: name, TraceID: tc.TraceID}
+		Method: req.Method, Tool: name, TraceID: observability.TraceID(r.Context())}
 	return func(target, decision, outcome string) {
 		rec.Target, rec.Decision, rec.Outcome, rec.LatencyMS = target, decision, outcome, time.Since(start).Milliseconds()
+		span.SetAttributes(attribute.String("idp.decision", decision), attribute.String("idp.outcome", outcome), attribute.String("idp.target", target))
 		g.cfg.Recorder.Record(rec)
 	}
 }
@@ -235,8 +241,7 @@ func (g *Gateway) promptsGet(w http.ResponseWriter, r *http.Request, st *state, 
 		Name string `json:"name"`
 	}
 	_ = req.DecodeParams(&p)
-	tc := observability.ParseOrStart(r.Header.Get("traceparent"), r.Header.Get("tracestate"))
-	done := g.recorder(st, pr, req, p.Name, tc)
+	done := g.recorder(r, st, pr, req, p.Name)
 	target, native, ok := g.promptOwner(st, pr, p.Name)
 	if !ok {
 		done("", invocation.Deny, invocation.OutcomeDenied)
@@ -251,7 +256,7 @@ func (g *Gateway) promptsGet(w http.ResponseWriter, r *http.Request, st *state, 
 	}
 	params := rawParams(req)
 	params["name"], _ = json.Marshal(native)
-	done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), native, params, tc))
+	done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), native, params))
 }
 
 func (g *Gateway) resourcesList(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, pr authorization.Principal, method, field, key string) {
@@ -353,15 +358,14 @@ func (g *Gateway) resourcesRead(w http.ResponseWriter, r *http.Request, st *stat
 		URI string `json:"uri"`
 	}
 	_ = req.DecodeParams(&p)
-	tc := observability.ParseOrStart(r.Header.Get("traceparent"), r.Header.Get("tracestate"))
-	done := g.recorder(st, pr, req, p.URI, tc)
+	done := g.recorder(r, st, pr, req, p.URI)
 	target, ok := g.resourceOwner(r.Context(), st, pr, p.URI)
 	if !ok {
 		done("", invocation.Deny, invocation.OutcomeDenied)
 		transport.WriteError(w, http.StatusOK, req.ID, resourceNotFound(p.URI))
 		return
 	}
-	done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), p.URI, rawParams(req), tc))
+	done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), p.URI, rawParams(req)))
 }
 
 func (g *Gateway) complete(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, pr authorization.Principal) {
@@ -376,14 +380,13 @@ func (g *Gateway) complete(w http.ResponseWriter, r *http.Request, st *state, re
 		transport.WriteError(w, http.StatusBadRequest, req.ID, err.(*server.Error))
 		return
 	}
-	tc := observability.ParseOrStart(r.Header.Get("traceparent"), r.Header.Get("tracestate"))
 	params := rawParams(req)
 	var target string
 	var ok bool
 	switch p.Ref.Type {
 	case "ref/prompt":
 		var native string
-		done := g.recorder(st, pr, req, p.Ref.Name, tc)
+		done := g.recorder(r, st, pr, req, p.Ref.Name)
 		if target, native, ok = g.promptOwner(st, pr, p.Ref.Name); !ok {
 			done("", invocation.Deny, invocation.OutcomeDenied)
 			transport.WriteError(w, http.StatusOK, req.ID, &server.Error{Code: server.CodeInvalidParams, Message: "Unknown prompt: " + p.Ref.Name})
@@ -393,15 +396,15 @@ func (g *Gateway) complete(w http.ResponseWriter, r *http.Request, st *state, re
 		_ = json.Unmarshal(params["ref"], &ref)
 		ref["name"], _ = json.Marshal(native)
 		params["ref"], _ = json.Marshal(ref)
-		done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params, tc))
+		done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params))
 	case "ref/resource":
-		done := g.recorder(st, pr, req, p.Ref.URI, tc)
+		done := g.recorder(r, st, pr, req, p.Ref.URI)
 		if target, ok = g.resourceOwner(r.Context(), st, pr, p.Ref.URI); !ok {
 			done("", invocation.Deny, invocation.OutcomeDenied)
 			transport.WriteError(w, http.StatusOK, req.ID, resourceNotFound(p.Ref.URI))
 			return
 		}
-		done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params, tc))
+		done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params))
 	default:
 		transport.WriteError(w, http.StatusOK, req.ID, &server.Error{Code: server.CodeInvalidParams, Message: "ref.type must be ref/prompt or ref/resource"})
 	}

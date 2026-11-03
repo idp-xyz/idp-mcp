@@ -25,6 +25,8 @@
 //	                             whose spiffe://idp-mcp/gateway/<id> URI matches the gateway credential
 //	IDP_UPSTREAM_CA_FILE         extra trusted CAs for https MCP servers (discovery)
 //	IDP_IDENTITY_CA_FILE         extra trusted CAs for the admin JWKS endpoint
+//	OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_HEADERS /
+//	OTEL_EXPORTER_OTLP_CERTIFICATE / OTEL_SERVICE_NAME   OTLP/HTTP trace export (off without an endpoint)
 package main
 
 import (
@@ -143,6 +145,15 @@ func main() {
 func serve(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	tp, stopTracing, err := observability.Setup("idp-mcp-registry", version, log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = stopTracing(fctx)
+	}()
 	dev := env("IDP_DEV_MODE", "false") == "true"
 	issuer, audience := env("IDP_ADMIN_ISSUER", "idp-mcp-dev"), env("IDP_ADMIN_AUDIENCE", "idp-mcp-registry")
 	var admin registry.AdminAuth
@@ -184,7 +195,7 @@ func serve(log *slog.Logger) error {
 		return errors.New("IDP_GATEWAY_CLIENT_CA_FILE needs IDP_TLS_CERT_FILE and IDP_TLS_KEY_FILE")
 	}
 	api := &registry.API{Svc: svc, Admin: admin, Log: log, RequireGatewayCert: clientCA != ""}
-	srv := &http.Server{Addr: env("IDP_REGISTRY_LISTEN", "127.0.0.1:8250"), Handler: api.Handler(),
+	srv := &http.Server{Addr: env("IDP_REGISTRY_LISTEN", "127.0.0.1:8250"), Handler: observability.HTTPMiddleware(tp, "idp-mcp/registry", api.Handler()),
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 120 * time.Second}
 	if certFile != "" {
 		if srv.TLSConfig, err = transport.ServerTLS(certFile, keyFile, clientCA); err != nil {

@@ -15,9 +15,12 @@ import (
 	"net/url"
 	"time"
 
+	"idp-mcp/internal/observability"
 	"idp-mcp/internal/policy"
 	"idp-mcp/internal/server"
 	"idp-mcp/internal/transport"
+
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // MaxResponse bounds a buffered upstream response (discovery, catalogs).
@@ -103,6 +106,7 @@ func (c *Client) Call(ctx context.Context, endpoint, method string, params map[s
 		return nil, err
 	}
 	req.Header = Headers(method, name)
+	observability.Propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("upstream unreachable: %w", err)

@@ -21,10 +21,13 @@ import (
 	"idp-mcp/internal/authorization"
 	"idp-mcp/internal/client"
 	"idp-mcp/internal/invocation"
+	"idp-mcp/internal/observability"
 	"idp-mcp/internal/policy"
 	"idp-mcp/internal/release"
 	"idp-mcp/internal/routing"
 	"idp-mcp/internal/server"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Config of a gateway instance.
@@ -36,9 +39,10 @@ type Config struct {
 	CallTimeout   time.Duration // per tools/call
 	DriftInterval time.Duration
 	Recorder      invocation.Recorder
-	Dropped       func() int64 // invocation records lost, reported in Status
-	IdentityHTTP  *http.Client // JWKS fetches
-	UpstreamTLS   *tls.Config  // extra trusted CAs for https upstreams (optional)
+	Dropped       func() int64         // invocation records lost, reported in Status
+	IdentityHTTP  *http.Client         // JWKS fetches
+	UpstreamTLS   *tls.Config          // extra trusted CAs for https upstreams (optional)
+	Tracer        trace.TracerProvider // optional; default: SDK provider without exporter
 	Log           *slog.Logger
 }
 
@@ -115,6 +119,7 @@ type Gateway struct {
 	refused   atomic.Value // [2]string{digest, reason}
 	hosts     map[string]bool
 	listeners hub // open subscriptions/listen streams
+	tracer    trace.Tracer
 }
 
 // New returns a gateway without a release; it answers 503 until one is activated.
@@ -134,7 +139,11 @@ func New(cfg Config) *Gateway {
 	if cfg.IdentityHTTP == nil {
 		cfg.IdentityHTTP = &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	}
-	g := &Gateway{cfg: cfg, checkNow: make(chan struct{}, 1), hosts: map[string]bool{"127.0.0.1": true, "localhost": true, "::1": true}}
+	if cfg.Tracer == nil {
+		cfg.Tracer = observability.NewTracerProvider(cfg.Info.Name, cfg.Info.Version, nil)
+	}
+	g := &Gateway{cfg: cfg, checkNow: make(chan struct{}, 1), hosts: map[string]bool{"127.0.0.1": true, "localhost": true, "::1": true},
+		tracer: cfg.Tracer.Tracer("idp-mcp/gateway")}
 	for _, h := range cfg.AllowedHosts {
 		g.hosts[h] = true
 	}

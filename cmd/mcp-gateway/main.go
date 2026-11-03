@@ -19,6 +19,8 @@
 //	                           (certificate URI SAN spiffe://idp-mcp/gateway/<IDP_GATEWAY_ID>)
 //	IDP_UPSTREAM_CA_FILE       extra trusted CAs for https MCP servers
 //	IDP_IDENTITY_CA_FILE       extra trusted CAs for the JWKS endpoint
+//	OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_HEADERS /
+//	OTEL_EXPORTER_OTLP_CERTIFICATE / OTEL_SERVICE_NAME   OTLP/HTTP trace export (off without an endpoint)
 package main
 
 import (
@@ -101,6 +103,15 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	tp, stopTracing, err := observability.Setup("idp-mcp-gateway", version, log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = stopTracing(fctx)
+	}()
 
 	upstreamTLS, err := transport.ClientTLS(env("IDP_UPSTREAM_CA_FILE", ""), "", "")
 	if err != nil {
@@ -112,6 +123,7 @@ func run(log *slog.Logger) error {
 	}
 	cfg := gateway.Config{GatewayID: id, Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: version},
 		UpstreamTLS:  upstreamTLS,
+		Tracer:       tp,
 		IdentityHTTP: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: identityTLS}},
 		DevMode:      env("IDP_DEV_MODE", "false") == "true", AllowedHosts: hosts,
 		CallTimeout: duration("IDP_CALL_TIMEOUT", 60*time.Second), DriftInterval: duration("IDP_DRIFT_INTERVAL", time.Minute), Log: log}

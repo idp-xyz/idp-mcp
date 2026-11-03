@@ -18,6 +18,10 @@ import (
 	"idp-mcp/internal/invocation"
 	"idp-mcp/internal/release"
 	"idp-mcp/internal/server"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ---- fake upstream ---------------------------------------------------------------------------
@@ -499,5 +503,60 @@ func TestArgumentsAreValidatedBeforeDelivery(t *testing.T) {
 	}
 	if r := h.rpc(t, operatorKey, "tools/call", call("minimal__echo", `{"text":"ok"}`), map[string]string{server.HeaderName: "minimal__echo"}); r.status != 200 || errCode(r) != 0 {
 		t.Fatalf("valid call: %s", r.raw)
+	}
+}
+
+func TestSpansCoverTheRequestAndTheUpstreamCall(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	up := newUpstream(t)
+	rec := &recorder{}
+	g := New(Config{GatewayID: "g1", Info: server.ServerInfo{Name: "gw", Version: "t"}, DevMode: true, CallTimeout: 2 * time.Second, Recorder: rec, Tracer: tp})
+	if err := g.Activate(buildRelease(t, up.srv.URL+"/mcp", "block", nil)); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g.Handler())
+	defer srv.Close()
+	h := &harness{g: g, up: up, rec: rec, srv: srv}
+	incoming := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	h.rpc(t, operatorKey, "tools/call", call("minimal__echo", `{"text":"x"}`), map[string]string{server.HeaderName: "minimal__echo", "traceparent": incoming})
+	h.rpc(t, viewerKey, "tools/call", call("minimal__echo", `{"text":"x"}`), map[string]string{server.HeaderName: "minimal__echo"})
+	spans := exp.GetSpans()
+	byName := map[string][]tracetest.SpanStub{}
+	for _, s := range spans {
+		byName[s.Name] = append(byName[s.Name], s)
+	}
+	if len(byName["mcp tools/call"]) != 2 || len(byName["upstream tools/call"]) != 1 {
+		t.Fatalf("spans: %d request, %d upstream (denied calls must not reach the upstream)", len(byName["mcp tools/call"]), len(byName["upstream tools/call"]))
+	}
+	upSpan := byName["upstream tools/call"][0]
+	if upSpan.SpanContext.TraceID().String() != "0af7651916cd43dd8448eb211c80319c" || upSpan.SpanKind != trace.SpanKindClient {
+		t.Fatalf("upstream span %v %v", upSpan.SpanContext.TraceID(), upSpan.SpanKind)
+	}
+	var allowed tracetest.SpanStub
+	for _, s := range byName["mcp tools/call"] {
+		if s.SpanContext.TraceID().String() == "0af7651916cd43dd8448eb211c80319c" {
+			allowed = s
+		}
+	}
+	if allowed.Parent.SpanID().String() != "b7ad6b7169203331" || upSpan.Parent.SpanID() != allowed.SpanContext.SpanID() {
+		t.Fatalf("parentage: request parent %s, upstream parent %s, request span %s", allowed.Parent.SpanID(), upSpan.Parent.SpanID(), allowed.SpanContext.SpanID())
+	}
+	attrs := map[string]string{}
+	for _, a := range allowed.Attributes {
+		attrs[string(a.Key)] = a.Value.Emit()
+	}
+	if attrs["mcp.tool"] != "minimal__echo" || attrs["idp.decision"] != "ALLOW" || attrs["idp.outcome"] != "OK" || attrs["idp.target"] != "minimal" {
+		t.Fatalf("attributes %v", attrs)
+	}
+	if h.up.requests[0].Header.Get("traceparent") != "00-0af7651916cd43dd8448eb211c80319c-"+upSpan.SpanContext.SpanID().String()+"-01" {
+		t.Fatalf("upstream traceparent %q", h.up.requests[0].Header.Get("traceparent"))
+	}
+	for _, s := range spans {
+		for _, a := range s.Attributes {
+			if strings.Contains(a.Value.Emit(), operatorKey) || strings.Contains(a.Value.Emit(), "svc-operator") {
+				t.Fatalf("span carries a credential or subject: %s=%s", a.Key, a.Value.Emit())
+			}
+		}
 	}
 }

@@ -22,6 +22,11 @@ import (
 	"idp-mcp/internal/release"
 	"idp-mcp/internal/server"
 	"idp-mcp/internal/transport"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // MaxUpstreamJSON bounds a buffered (non-streamed) tools/call response.
@@ -131,6 +136,12 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		transport.WriteRejection(w, rej)
 		return
 	}
+	// one server span per request; a valid incoming traceparent is continued, else a trace starts
+	ctx := observability.Propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+	ctx, span := g.tracer.Start(ctx, "mcp "+req.Method, trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attribute.String("mcp.method", req.Method)))
+	defer span.End()
+	r = r.WithContext(ctx)
 	st := g.cur.Load()
 	if st == nil {
 		transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError, Message: "Gateway has no active release"})
@@ -206,14 +217,16 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 		transport.WriteError(w, http.StatusBadRequest, req.ID, err.(*server.Error))
 		return
 	}
-	tc := observability.ParseOrStart(r.Header.Get("traceparent"), r.Header.Get("tracestate"))
+	span := trace.SpanFromContext(r.Context())
+	span.SetAttributes(attribute.String("mcp.tool", p.Name))
 	rec := invocation.Record{At: start.UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject, AuthMethod: pr.Method,
-		Method: req.Method, Tool: p.Name, TraceID: tc.TraceID}
+		Method: req.Method, Tool: p.Name, TraceID: observability.TraceID(r.Context())}
 	if len(p.Arguments) > 0 {
 		rec.ArgsDigest, _ = release.Digest(p.Arguments)
 	}
 	done := func(decision, outcome string) {
 		rec.Decision, rec.Outcome, rec.LatencyMS = decision, outcome, time.Since(start).Milliseconds()
+		span.SetAttributes(attribute.String("idp.decision", decision), attribute.String("idp.outcome", outcome), attribute.String("idp.target", rec.Target))
 		g.cfg.Recorder.Record(rec)
 	}
 	rt, found := st.router.Lookup(p.Name)
@@ -237,7 +250,7 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 	}
 	params := rawParams(req)
 	params["name"], _ = json.Marshal(rt.Tool.Name)
-	outcome := g.forward(w, r, st, req, rt.Endpoint, rt.Tool.Name, params, tc)
+	outcome := g.forward(w, r, st, req, rt.Endpoint, rt.Tool.Name, params)
 	done(invocation.Allow, outcome)
 }
 
@@ -246,16 +259,23 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 // client's params - _meta, inputResponses, requestState, progress tokens - are forwarded as they
 // are, so multi-round flows (InputRequiredResult) work end to end.
 func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, endpoint, nameHeader string,
-	params map[string]json.RawMessage, tc observability.TraceContext) string {
+	params map[string]json.RawMessage) (outcome string) {
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "method": req.Method, "params": params})
 	ctx, cancel := context.WithTimeout(r.Context(), g.cfg.CallTimeout)
 	defer cancel()
+	// a client span for the upstream call; the span's context (new span id) travels in traceparent
+	ctx, span := g.tracer.Start(ctx, "upstream "+req.Method, trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("mcp.method", req.Method), attribute.String("server.address", client.Redact(endpoint))))
+	defer func() {
+		span.SetAttributes(attribute.String("idp.outcome", outcome))
+		if outcome == invocation.OutcomeUnknown || outcome == invocation.OutcomeNotDelivered {
+			span.SetStatus(codes.Error, outcome)
+		}
+		span.End()
+	}()
 	up, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	up.Header = client.Headers(req.Method, nameHeader)
-	up.Header.Set("traceparent", tc.Child())
-	if tc.State != "" {
-		up.Header.Set("tracestate", tc.State)
-	}
+	observability.Propagator.Inject(ctx, propagation.HeaderCarrier(up.Header))
 	resp, err := st.upstream.HTTP.Do(up)
 	if err != nil {
 		var op *net.OpError
