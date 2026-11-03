@@ -177,6 +177,7 @@ func run(log *slog.Logger) error {
 		return err
 	case <-ctx.Done():
 	}
+	g.Shutdown() // end listen streams with their final result, so Shutdown does not wait on them
 	shutdown, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdown)

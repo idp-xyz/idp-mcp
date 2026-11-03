@@ -98,15 +98,19 @@ func templateRE(tpl string) *regexp.Regexp {
 }
 
 // federatedCapabilities is the gateway's server/discover capability set: what at least one target
-// contributes. List-change notifications and subscriptions are not federated (yet).
+// contributes. tools/prompts list changes come from the gateway itself (on release activation, see
+// listen.go); resource subscriptions and list changes are relayed from targets that offer them.
 func federatedCapabilities(d *release.Document) map[string]any {
-	caps := map[string]any{"tools": map[string]any{"listChanged": false}}
+	caps := map[string]any{"tools": map[string]any{"listChanged": true}}
+	var subscribe, listChanged bool
 	for _, t := range d.Targets {
 		if t.HasCapability(release.CapPrompts) {
-			caps["prompts"] = map[string]any{"listChanged": false}
+			caps["prompts"] = map[string]any{"listChanged": true}
 		}
 		if t.HasCapability(release.CapResources) {
-			caps["resources"] = map[string]any{"subscribe": false, "listChanged": false}
+			subscribe = subscribe || t.HasCapability(release.CapResourcesSubscribe)
+			listChanged = listChanged || t.HasCapability(release.CapResourcesListChanged)
+			caps["resources"] = map[string]any{"subscribe": subscribe, "listChanged": listChanged}
 		}
 		if t.HasCapability(release.CapCompletions) {
 			caps["completions"] = map[string]any{}

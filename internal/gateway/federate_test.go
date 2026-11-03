@@ -22,7 +22,9 @@ type richUpstream struct {
 	label      string
 	mu         sync.Mutex
 	got        []map[string]any
-	promptDesc string // greet's description; changing it is a rug pull on a prompt
+	promptDesc string      // greet's description; changing it is a rug pull on a prompt
+	events     chan string // JSON-RPC notifications to emit on open listen streams
+	listens    []map[string]any
 }
 
 func (u *richUpstream) promptsJSON() string {
@@ -32,7 +34,7 @@ func (u *richUpstream) promptsJSON() string {
 }
 
 func newRich(t *testing.T, label string) *richUpstream {
-	u := &richUpstream{label: label, promptDesc: label}
+	u := &richUpstream{label: label, promptDesc: label, events: make(chan string, 16)}
 	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		var req map[string]any
@@ -60,6 +62,21 @@ func newRich(t *testing.T, label string) *richUpstream {
 		case "completion/complete":
 			ref, _ := json.Marshal(params["ref"])
 			res(`{"completion":{"values":[` + string(ref) + `]}}`)
+		case "subscriptions/listen":
+			u.mu.Lock()
+			u.listens = append(u.listens, params)
+			u.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			flush := func(s string) { _, _ = io.WriteString(w, "event: message\ndata: "+s+"\n\n"); w.(http.Flusher).Flush() }
+			flush(`{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":{},"_meta":{"io.modelcontextprotocol/subscriptionId":"idp-relay"}}}`)
+			for {
+				select {
+				case ev := <-u.events:
+					flush(ev)
+				case <-r.Context().Done():
+					return
+				}
+			}
 		default:
 			w.WriteHeader(404)
 			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(id)+`,"error":{"code":-32601,"message":"nope"}}`)
@@ -67,6 +84,12 @@ func newRich(t *testing.T, label string) *richUpstream {
 	}))
 	t.Cleanup(u.srv.Close)
 	return u
+}
+
+func (u *richUpstream) listenParams() []map[string]any {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]map[string]any(nil), u.listens...)
 }
 
 func (u *richUpstream) methods() []string {
@@ -96,7 +119,8 @@ func richRelease(t *testing.T, naming string, ups ...*richUpstream) *release.Env
 		digest, _ := federation.CatalogDigest(tools, prompts)
 		d.Targets = append(d.Targets, release.Target{Name: u.label, ServerID: "s-" + u.label, Endpoint: u.srv.URL + "/mcp",
 			Network: release.NetworkLoopback, SnapshotDigest: digest, Tools: tools, Prompts: prompts,
-			Capabilities: []string{release.CapTools, release.CapPrompts, release.CapResources, release.CapCompletions}})
+			Capabilities: []string{release.CapTools, release.CapPrompts, release.CapResources, release.CapCompletions,
+				release.CapResourcesSubscribe, release.CapResourcesListChanged}})
 		d.Grants = append(d.Grants,
 			release.Grant{Target: u.label, Prompts: []string{"*"}, Resources: true, Roles: []string{"operator"}},
 			release.Grant{Target: u.label, Prompts: []string{"greet"}, Roles: []string{"viewer"}})

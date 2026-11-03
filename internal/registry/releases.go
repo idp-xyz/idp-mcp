@@ -15,6 +15,7 @@ import (
 
 	"idp-mcp/adapters/identity"
 	"idp-mcp/internal/audit"
+	"idp-mcp/internal/federation"
 	"idp-mcp/internal/release"
 	"idp-mcp/internal/server"
 )
@@ -242,8 +243,7 @@ func (s *Service) CompileRelease(ctx context.Context, p Principal, gatewayID str
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT gr.id::text, gr.tools, gr.prompts, gr.resources, gr.roles, s.id::text, s.target_name, s.endpoint, s.network, sn.digest, sn.tools, sn.prompts,
-			coalesce((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(coalesce(sn.discovery->'capabilities', '{}'::jsonb)) k
-			          WHERE k IN ('tools', 'prompts', 'resources', 'completions')), '{}')
+			coalesce(sn.discovery->'capabilities', '{}'::jsonb)
 			FROM grants gr JOIN servers s ON s.id = gr.server_id JOIN snapshots sn ON sn.id = s.approved_snapshot_id
 			WHERE gr.status = 'APPROVED' AND s.lifecycle = 'APPROVED' ORDER BY s.target_name, gr.id`)
 		if err != nil {
@@ -253,9 +253,10 @@ func (s *Service) CompileRelease(ctx context.Context, p Principal, gatewayID str
 		var grants []release.Grant
 		for rows.Next() {
 			var gid, sid, name, endpoint, network, digest, toolsRaw, promptsRaw string
-			var tools, prompts, roles, caps []string
+			var tools, prompts, roles []string
 			var resources bool
-			if err := rows.Scan(&gid, &tools, &prompts, &resources, &roles, &sid, &name, &endpoint, &network, &digest, &toolsRaw, &promptsRaw, &caps); err != nil {
+			var capObj map[string]any
+			if err := rows.Scan(&gid, &tools, &prompts, &resources, &roles, &sid, &name, &endpoint, &network, &digest, &toolsRaw, &promptsRaw, &capObj); err != nil {
 				rows.Close()
 				return err
 			}
@@ -274,7 +275,7 @@ func (s *Service) CompileRelease(ctx context.Context, p Principal, gatewayID str
 					pinnedPrompts = nil
 				}
 				targets[name] = &release.Target{Name: name, ServerID: sid, Endpoint: endpoint, Network: network, SnapshotDigest: digest,
-					Tools: pinned, Prompts: pinnedPrompts, Capabilities: caps}
+					Tools: pinned, Prompts: pinnedPrompts, Capabilities: federation.Capabilities(capObj)}
 			}
 			have := map[string]bool{}
 			for _, t := range targets[name].Tools {

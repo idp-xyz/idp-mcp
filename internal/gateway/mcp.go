@@ -169,6 +169,8 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		g.resourcesRead(w, r, st, req, pr)
 	case "completion/complete":
 		g.complete(w, r, st, req, pr)
+	case "subscriptions/listen":
+		g.listen(w, r, st, req, pr)
 	default:
 		transport.WriteError(w, http.StatusNotFound, req.ID, server.MethodNotFound(req.Method))
 	}

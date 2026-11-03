@@ -114,6 +114,7 @@ type Gateway struct {
 	lastError atomic.Value // string
 	refused   atomic.Value // [2]string{digest, reason}
 	hosts     map[string]bool
+	listeners hub // open subscriptions/listen streams
 }
 
 // New returns a gateway without a release; it answers 503 until one is activated.
@@ -200,6 +201,9 @@ func (g *Gateway) activate(env *release.Envelope) error {
 	}
 	g.lastError.Store("")
 	g.cfg.Log.Info("release activated", "release", doc.ReleaseID, "digest", env.Digest, "targets", len(doc.Targets))
+	if old != nil && old.env.Digest != env.Digest {
+		g.listeners.broadcast() // pinned lists may have changed; listen streams re-check their caller
+	}
 	select {
 	case g.checkNow <- struct{}{}:
 	default:

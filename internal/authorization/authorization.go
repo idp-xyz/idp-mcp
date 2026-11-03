@@ -4,6 +4,7 @@ package authorization
 
 import (
 	"sort"
+	"time"
 
 	"idp-mcp/internal/release"
 )
@@ -13,8 +14,9 @@ type Principal struct {
 	Subject string
 	Tenant  string
 	Roles   []string
-	Method  string // "api-key" or "jwt"
-	KeyID   string // api-key id, if any
+	Method  string    // "api-key" or "jwt"
+	KeyID   string    // api-key id, if any
+	Expires time.Time // credential expiry (JWT exp); zero for API keys
 }
 
 // Policy is the compiled grant set of one release.

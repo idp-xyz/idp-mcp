@@ -106,3 +106,24 @@ func ToolsDigest(tools []server.Tool) (string, error) { return release.CatalogDi
 func CatalogDigest(tools []server.Tool, prompts []server.Prompt) (string, error) {
 	return release.CatalogDigest(tools, prompts)
 }
+
+// Capabilities maps a server/discover capability object to the federated capability names a release
+// records for the target (release.Cap*), sorted.
+func Capabilities(caps map[string]any) []string {
+	var out []string
+	for _, c := range []string{release.CapTools, release.CapPrompts, release.CapResources, release.CapCompletions} {
+		if _, ok := caps[c]; ok {
+			out = append(out, c)
+		}
+	}
+	if res, ok := caps["resources"].(map[string]any); ok {
+		if v, _ := res["subscribe"].(bool); v {
+			out = append(out, release.CapResourcesSubscribe)
+		}
+		if v, _ := res["listChanged"].(bool); v {
+			out = append(out, release.CapResourcesListChanged)
+		}
+	}
+	sort.Strings(out)
+	return out
+}

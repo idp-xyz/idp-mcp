@@ -61,11 +61,15 @@ const (
 )
 
 // Capabilities a target can contribute to the federation (besides tools, which are pinned).
+// The resources.* entries refine "resources": the server delivers resource list changes or resource
+// updates on subscriptions/listen.
 const (
-	CapTools       = "tools"
-	CapPrompts     = "prompts"
-	CapResources   = "resources"
-	CapCompletions = "completions"
+	CapTools                = "tools"
+	CapPrompts              = "prompts"
+	CapResources            = "resources"
+	CapCompletions          = "completions"
+	CapResourcesSubscribe   = "resources.subscribe"
+	CapResourcesListChanged = "resources.listChanged"
 )
 
 // Expose returns the client-facing name of a target's tool or prompt.
@@ -263,7 +267,9 @@ func (d *Document) Validate() error {
 		}
 		caps[t.Name] = map[string]bool{}
 		for _, c := range t.Capabilities {
-			if c != CapTools && c != CapPrompts && c != CapResources && c != CapCompletions {
+			switch c {
+			case CapTools, CapPrompts, CapResources, CapCompletions, CapResourcesSubscribe, CapResourcesListChanged:
+			default:
 				bad("target %s: unknown capability %q", t.Name, c)
 			}
 			caps[t.Name][c] = true

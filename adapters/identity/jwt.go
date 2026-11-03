@@ -187,7 +187,11 @@ func (a *JWTAuth) Authenticate(ctx context.Context, bearer string) (authorizatio
 		}
 		roles = append(roles, s)
 	}
-	return authorization.Principal{Subject: sub, Tenant: tenant, Roles: roles, Method: "jwt"}, nil
+	var expires time.Time
+	if exp, err := claims.GetExpirationTime(); err == nil && exp != nil {
+		expires = exp.Time
+	}
+	return authorization.Principal{Subject: sub, Tenant: tenant, Roles: roles, Method: "jwt", Expires: expires}, nil
 }
 
 // Challenge implements Authenticator: points the client at the RFC 9728 metadata.

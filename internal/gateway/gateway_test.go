@@ -298,7 +298,7 @@ func TestDiscoverPingAndUnfederatedMethods(t *testing.T) {
 		}
 	}
 	// ping was removed in 2026-07-28 (SEP-2575): 404 / -32601 like any unknown method
-	for _, m := range []string{"ping", "resources/subscribe", "subscriptions/listen", "tasks/list", "vendor/x"} {
+	for _, m := range []string{"ping", "resources/subscribe", "resources/unsubscribe", "tasks/list", "vendor/x"} {
 		if r := h.rpc(t, operatorKey, m, "", nil); r.status != 404 || errCode(r) != server.CodeMethodNotFound {
 			t.Errorf("%s: %d %s", m, r.status, r.raw)
 		}

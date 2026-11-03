@@ -188,12 +188,7 @@ func TestOfficialConformance(t *testing.T) {
 	for _, tl := range tools {
 		names = append(names, tl.Name)
 	}
-	var caps []string
-	for _, c := range []string{release.CapTools, release.CapPrompts, release.CapResources, release.CapCompletions} {
-		if _, ok := disc.Capabilities[c]; ok {
-			caps = append(caps, c)
-		}
-	}
+	caps := federation.Capabilities(disc.Capabilities)
 	doc := &release.Document{SchemaVersion: release.SchemaVersion, ReleaseID: "conformance", TenantID: "t", GatewayID: "g",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339), CreatedBy: "harness", ApprovedBy: "harness-reviewer",
 		DriftAction: "block", ToolNaming: release.NamingNative,
