@@ -20,6 +20,11 @@
 //	IDP_ALLOWED_UPSTREAM_HOSTS   hosts MCP servers may be registered on, comma separated
 //	IDP_PRIVATE_UPSTREAM_HOSTS   of those, the ones that may resolve to private addresses
 //	IDP_DEPLOY_TIMEOUT           how long a deployment waits for the gateway's attestation (30s)
+//	IDP_TLS_CERT_FILE / IDP_TLS_KEY_FILE   serve HTTPS
+//	IDP_GATEWAY_CLIENT_CA_FILE   require mutual TLS on /internal/v1: a client certificate from this CA
+//	                             whose spiffe://idp-mcp/gateway/<id> URI matches the gateway credential
+//	IDP_UPSTREAM_CA_FILE         extra trusted CAs for https MCP servers (discovery)
+//	IDP_IDENTITY_CA_FILE         extra trusted CAs for the admin JWKS endpoint
 package main
 
 import (
@@ -41,6 +46,7 @@ import (
 	"idp-mcp/internal/policy"
 	"idp-mcp/internal/registry"
 	"idp-mcp/internal/server"
+	"idp-mcp/internal/transport"
 )
 
 var version = "0.1.0-dev"
@@ -140,10 +146,18 @@ func serve(log *slog.Logger) error {
 	dev := env("IDP_DEV_MODE", "false") == "true"
 	issuer, audience := env("IDP_ADMIN_ISSUER", "idp-mcp-dev"), env("IDP_ADMIN_AUDIENCE", "idp-mcp-registry")
 	var admin registry.AdminAuth
+	identityTLS, err := transport.ClientTLS(env("IDP_IDENTITY_CA_FILE", ""), "", "")
+	if err != nil {
+		return fmt.Errorf("IDP_IDENTITY_CA_FILE: %w", err)
+	}
+	upstreamTLS, err := transport.ClientTLS(env("IDP_UPSTREAM_CA_FILE", ""), "", "")
+	if err != nil {
+		return fmt.Errorf("IDP_UPSTREAM_CA_FILE: %w", err)
+	}
 	switch {
 	case env("IDP_ADMIN_JWKS_URL", "") != "":
 		admin = identity.NewJWKSAdminVerifier(issuer, audience, &identity.JWKS{URL: env("IDP_ADMIN_JWKS_URL", ""),
-			HTTP: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}, TTL: 10 * time.Minute, MinRefresh: 30 * time.Second})
+			HTTP: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: identityTLS}}, TTL: 10 * time.Minute, MinRefresh: 30 * time.Second})
 	case dev && secret("IDP_DEV_ADMIN_SECRET") != "":
 		v, err := identity.NewDevAdminVerifier(issuer, audience, []byte(secret("IDP_DEV_ADMIN_SECRET")))
 		if err != nil {
@@ -164,13 +178,28 @@ func serve(log *slog.Logger) error {
 	}
 	pol := &policy.Upstream{AllowedHosts: hostSet("IDP_ALLOWED_UPSTREAM_HOSTS"), PrivateHosts: hostSet("IDP_PRIVATE_UPSTREAM_HOSTS"), DevMode: dev}
 	svc := &registry.Service{Store: store, Policy: pol, DeployTimeout: deployTimeout, PollEvery: 250 * time.Millisecond, Log: log,
-		Upstream: &client.Client{HTTP: client.NewHTTPClient(pol, 15*time.Second), Info: server.ServerInfo{Name: "idp-mcp-registry", Version: version}}}
-	api := &registry.API{Svc: svc, Admin: admin, Log: log}
+		Upstream: &client.Client{HTTP: client.NewHTTPClient(pol, 15*time.Second, upstreamTLS), Info: server.ServerInfo{Name: "idp-mcp-registry", Version: version}}}
+	certFile, keyFile, clientCA := env("IDP_TLS_CERT_FILE", ""), env("IDP_TLS_KEY_FILE", ""), env("IDP_GATEWAY_CLIENT_CA_FILE", "")
+	if clientCA != "" && certFile == "" {
+		return errors.New("IDP_GATEWAY_CLIENT_CA_FILE needs IDP_TLS_CERT_FILE and IDP_TLS_KEY_FILE")
+	}
+	api := &registry.API{Svc: svc, Admin: admin, Log: log, RequireGatewayCert: clientCA != ""}
 	srv := &http.Server{Addr: env("IDP_REGISTRY_LISTEN", "127.0.0.1:8250"), Handler: api.Handler(),
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 120 * time.Second}
+	if certFile != "" {
+		if srv.TLSConfig, err = transport.ServerTLS(certFile, keyFile, clientCA); err != nil {
+			return fmt.Errorf("TLS: %w", err)
+		}
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	log.Info("registry-service listening", "addr", srv.Addr, "devMode", dev)
+	go func() {
+		if srv.TLSConfig != nil {
+			errc <- srv.ListenAndServeTLS("", "")
+		} else {
+			errc <- srv.ListenAndServe()
+		}
+	}()
+	log.Info("registry-service listening", "addr", srv.Addr, "devMode", dev, "tls", srv.TLSConfig != nil, "gatewayMTLS", clientCA != "")
 	select {
 	case err := <-errc:
 		return err

@@ -1,0 +1,485 @@
+openapi: 3.1.0
+info:
+  title: idp-mcp registry-service API
+  version: 1.0.0
+  description: |
+    Control plane of idp-mcp (docs/adr/ADR-0001-go-redesign.md).
+
+    * `/api/v1` - admin API. Bearer JWT with `sub`, `tenant_id`, `roles`, issuer and audience
+      `idp-mcp-registry` (production: verified with the IdP's JWKS; development: HS256 secret).
+      Every request is bound to the token's tenant by PostgreSQL row-level security.
+    * `/internal/v1` - used by gateways only, with the gateway credential (`idpgw_...`) returned once
+      by `POST /api/v1/gateways`.
+
+    Roles: `operator` registers servers, proposes grants and compiles releases; `reviewer` approves
+    servers, grants and releases, never ones they created (four-eyes); `admin` manages gateways and
+    credentials and deploys releases. Errors are `{"error": "<message>"}`.
+
+    This file is kept in step with the router by `internal/registry/openapi_test.go`.
+servers:
+  - url: http://127.0.0.1:8250
+    description: development (deploy/compose.yaml)
+security:
+  - adminBearer: []
+tags:
+  - name: Registry
+  - name: Grants
+  - name: Gateways
+  - name: Releases
+  - name: Record
+  - name: Internal
+
+paths:
+  /api/v1/health:
+    get:
+      summary: Liveness and database reachability
+      security: []
+      responses:
+        '200': {description: ok, content: {application/json: {schema: {type: object}}}}
+        '503': {$ref: '#/components/responses/Error'}
+
+  /api/v1/servers:
+    post:
+      tags: [Registry]
+      summary: Register an MCP server (operator); the endpoint must pass the upstream policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [displayName, targetName, endpoint]
+              properties:
+                displayName: {type: string, minLength: 1, maxLength: 120}
+                targetName: {type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'}
+                endpoint: {type: string, format: uri, description: 'http(s) URL ending in /mcp'}
+      responses:
+        '201': {description: registered (DRAFT), content: {application/json: {schema: {$ref: '#/components/schemas/Server'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+    get:
+      tags: [Registry]
+      summary: List the tenant's servers
+      responses:
+        '200': {description: servers, content: {application/json: {schema: {$ref: '#/components/schemas/ServerList'}}}}
+
+  /api/v1/servers/{id}:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    get:
+      tags: [Registry]
+      summary: One server
+      responses:
+        '200': {description: server, content: {application/json: {schema: {$ref: '#/components/schemas/Server'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+
+  /api/v1/servers/{id}/discover:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    post:
+      tags: [Registry]
+      summary: Snapshot the live catalog (tools and prompts) of the server (operator)
+      description: A catalog that differs from the approved one sends the server back to REVIEWED.
+      responses:
+        '200': {description: new snapshot, content: {application/json: {schema: {$ref: '#/components/schemas/Server'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+
+  /api/v1/servers/{id}/approve:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    post:
+      tags: [Registry]
+      summary: Approve the latest snapshot (reviewer, four-eyes)
+      responses:
+        '200': {description: approved, content: {application/json: {schema: {$ref: '#/components/schemas/Server'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+
+  /api/v1/grants:
+    post:
+      tags: [Grants]
+      summary: Propose a grant (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [serverId, roles]
+              description: At least one of tools, prompts or resources. Names must exist in the approved snapshot.
+              properties:
+                serverId: {type: string, format: uuid}
+                tools: {type: array, items: {type: string}}
+                prompts: {type: array, items: {type: string}, description: 'prompt names or "*"'}
+                resources: {type: boolean}
+                roles: {type: array, items: {type: string}, minItems: 1}
+      responses:
+        '201': {description: proposed, content: {application/json: {schema: {$ref: '#/components/schemas/Grant'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+    get:
+      tags: [Grants]
+      summary: List grants
+      responses:
+        '200': {description: grants, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Grant'}}}}}}}
+
+  /api/v1/grants/{id}/approve:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    post:
+      tags: [Grants]
+      summary: Approve a proposed grant (reviewer, four-eyes)
+      responses:
+        '200': {description: approved, content: {application/json: {schema: {$ref: '#/components/schemas/Grant'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+
+  /api/v1/grants/{id}/revoke:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    post:
+      tags: [Grants]
+      summary: Revoke a grant (reviewer or admin); effective with the next release
+      responses:
+        '200': {description: revoked, content: {application/json: {schema: {$ref: '#/components/schemas/Grant'}}}}
+
+  /api/v1/gateways:
+    post:
+      tags: [Gateways]
+      summary: Register a gateway instance (admin); returns its credential once
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, authMode]
+              properties:
+                name: {type: string}
+                authMode: {type: string, enum: [api-key, jwt]}
+                toolNaming: {type: string, enum: [prefixed, native], default: prefixed}
+                driftAction: {type: string, enum: [block, report], default: block}
+                jwt: {$ref: '#/components/schemas/JWTProfile'}
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  gateway: {$ref: '#/components/schemas/Gateway'}
+                  token: {type: string, description: 'gateway credential (idpgw_...), shown once'}
+        '400': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+    get:
+      tags: [Gateways]
+      summary: List gateways with their last attested status
+      responses:
+        '200': {description: gateways, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Gateway'}}}}}}}
+
+  /api/v1/gateways/{id}:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    get:
+      tags: [Gateways]
+      summary: One gateway with its last attested status
+      responses:
+        '200': {description: gateway, content: {application/json: {schema: {$ref: '#/components/schemas/Gateway'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+
+  /api/v1/gateways/{id}/api-keys:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    post:
+      tags: [Gateways]
+      summary: Issue a data-plane API key (admin, api-key gateways); effective with the next release
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [subject, roles]
+              properties:
+                subject: {type: string}
+                roles: {type: array, items: {type: string}, minItems: 1}
+      responses:
+        '201':
+          description: issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keyId: {type: string}
+                  key: {type: string, description: 'idpk_..., shown once'}
+                  subject: {type: string}
+                  roles: {type: array, items: {type: string}}
+
+  /api/v1/releases:
+    post:
+      tags: [Releases]
+      summary: Compile a CANDIDATE release for a gateway (operator)
+      description: Every APPROVED grant on an APPROVED server, each server pinned at its approved snapshot.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, required: [gatewayId], properties: {gatewayId: {type: string, format: uuid}}}
+      responses:
+        '201': {description: compiled, content: {application/json: {schema: {$ref: '#/components/schemas/Release'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+    get:
+      tags: [Releases]
+      summary: List releases (latest 100), optionally of one gateway
+      parameters:
+        - {name: gatewayId, in: query, required: false, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: releases, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Release'}}}}}}}
+
+  /api/v1/releases/{id}:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    get:
+      tags: [Releases]
+      summary: One release
+      responses:
+        '200': {description: release, content: {application/json: {schema: {$ref: '#/components/schemas/Release'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+
+  /api/v1/releases/{id}/approve:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    post:
+      tags: [Releases]
+      summary: Approve and seal a CANDIDATE release (reviewer, four-eyes)
+      responses:
+        '200': {description: approved; digest set, content: {application/json: {schema: {$ref: '#/components/schemas/Release'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+
+  /api/v1/releases/{id}/deploy:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    post:
+      tags: [Releases]
+      summary: Deploy (admin) and wait for the gateway's attestation
+      description: |
+        GOOD once the gateway reports this digest with every target's live catalog matching the pinned
+        snapshot. Otherwise FAILED, and the desired state returns to the previous release. APPROVED,
+        SUPERSEDED (rollback) and FAILED (retry) releases can be deployed.
+      responses:
+        '200': {description: GOOD, content: {application/json: {schema: {$ref: '#/components/schemas/DeployResult'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '502':
+          description: not attested; the result explains why
+          content:
+            application/json:
+              schema: {type: object, properties: {error: {type: string}, result: {$ref: '#/components/schemas/DeployResult'}}}
+
+  /api/v1/audit-events:
+    get:
+      tags: [Record]
+      summary: Latest 500 administrative audit events
+      responses:
+        '200': {description: events, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}}}}}}
+
+  /api/v1/invocations:
+    get:
+      tags: [Record]
+      summary: Latest 500 gateway decisions (arguments are stored as a digest only)
+      responses:
+        '200': {description: invocations, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Invocation'}}}}}}}
+
+  /internal/v1/gateway/desired:
+    get:
+      tags: [Internal]
+      summary: The gateway's desired release envelope
+      security: [{gatewayToken: []}]
+      parameters:
+        - {name: If-None-Match, in: header, required: false, schema: {type: string}, description: '"<digest>" of the running release'}
+      responses:
+        '200': {description: envelope; ETag is the digest, content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+        '204': {description: no desired release}
+        '304': {description: unchanged}
+        '401': {$ref: '#/components/responses/Error'}
+
+  /internal/v1/gateway/heartbeat:
+    post:
+      tags: [Internal]
+      summary: Attested gateway status
+      security: [{gatewayToken: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/GatewayStatus'}}}
+      responses:
+        '204': {description: stored}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+
+  /internal/v1/gateway/invocations:
+    post:
+      tags: [Internal]
+      summary: A batch of invocation records (at most 1000)
+      security: [{gatewayToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [records], properties: {records: {type: array, maxItems: 1000, items: {$ref: '#/components/schemas/InvocationRecord'}}}}
+      responses:
+        '204': {description: stored}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+
+components:
+  securitySchemes:
+    adminBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+    gatewayToken: {type: http, scheme: bearer, description: 'gateway credential idpgw_...'}
+  parameters:
+    id: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+  responses:
+    Error:
+      description: error
+      content: {application/json: {schema: {type: object, required: [error], properties: {error: {type: string}}}}}
+  schemas:
+    Server:
+      type: object
+      properties:
+        serverId: {type: string, format: uuid}
+        targetName: {type: string}
+        displayName: {type: string}
+        endpoint: {type: string}
+        network: {type: string, enum: [public, private, loopback]}
+        lifecycle: {type: string, enum: [DRAFT, REVIEWED, APPROVED, RETIRED]}
+        snapshotId: {type: [string, 'null']}
+        approvedSnapshotId: {type: [string, 'null']}
+        snapshotDigest: {type: [string, 'null']}
+        approvedDigest: {type: [string, 'null']}
+        toolNames: {type: array, items: {type: string}}
+        capabilities: {type: array, items: {type: string, enum: [tools, prompts, resources, completions]}}
+        createdBy: {type: string}
+        approvedBy: {type: [string, 'null']}
+        createdAt: {type: string, format: date-time}
+    ServerList:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Server'}}}
+    Grant:
+      type: object
+      properties:
+        grantId: {type: string, format: uuid}
+        serverId: {type: string, format: uuid}
+        tools: {type: array, items: {type: string}}
+        prompts: {type: array, items: {type: string}}
+        resources: {type: boolean}
+        roles: {type: array, items: {type: string}}
+        status: {type: string, enum: [PROPOSED, APPROVED, REVOKED]}
+        createdBy: {type: string}
+        decidedBy: {type: [string, 'null']}
+        createdAt: {type: string, format: date-time}
+        decidedAt: {type: [string, 'null'], format: date-time}
+    JWTProfile:
+      type: object
+      required: [issuer, resource, jwksUrl, tenantClaim, rolesClaim]
+      properties:
+        issuer: {type: string, format: uri}
+        resource: {type: string, format: uri, description: "canonical MCP resource URI (the gateway's public /mcp URL)"}
+        jwksUrl: {type: string, format: uri}
+        authorizationServers: {type: array, items: {type: string, format: uri}, description: 'defaults to [issuer]'}
+        tenantClaim: {type: string}
+        rolesClaim: {type: string}
+    Gateway:
+      type: object
+      properties:
+        gatewayId: {type: string, format: uuid}
+        name: {type: string}
+        authMode: {type: string, enum: [api-key, jwt]}
+        toolNaming: {type: string, enum: [prefixed, native]}
+        jwt: {$ref: '#/components/schemas/JWTProfile'}
+        driftAction: {type: string, enum: [block, report]}
+        desiredReleaseId: {type: [string, 'null']}
+        lastStatus: {oneOf: [{$ref: '#/components/schemas/GatewayStatus'}, {type: 'null'}]}
+        lastHeartbeatAt: {type: [string, 'null'], format: date-time}
+        createdBy: {type: string}
+        createdAt: {type: string, format: date-time}
+    GatewayStatus:
+      type: object
+      required: [gatewayId, version, checked, targets, invocationsDropped]
+      properties:
+        gatewayId: {type: string}
+        version: {type: string}
+        releaseId: {type: string}
+        digest: {type: string}
+        loadedAt: {type: string, format: date-time}
+        checked: {type: boolean, description: every target checked at least once}
+        targets:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              status: {type: string, enum: [PENDING, OK, DRIFTED, UNREACHABLE, INVALID]}
+              liveDigest: {type: string}
+              checkedAt: {type: string, format: date-time}
+              detail: {type: string}
+        invocationsDropped: {type: integer}
+        lastError: {type: string}
+        refusedDigest: {type: string}
+        refusedReason: {type: string}
+    Release:
+      type: object
+      properties:
+        releaseId: {type: string, format: uuid}
+        gatewayId: {type: string, format: uuid}
+        status: {type: string, enum: [CANDIDATE, APPROVED, DEPLOYING, GOOD, FAILED, SUPERSEDED]}
+        digest: {type: [string, 'null']}
+        document: {type: object, description: 'release document (schemaVersion idp.mcp.release/v1)'}
+        createdBy: {type: string}
+        approvedBy: {type: [string, 'null']}
+        failureReason: {type: [string, 'null']}
+        createdAt: {type: string, format: date-time}
+        approvedAt: {type: [string, 'null'], format: date-time}
+        deployedAt: {type: [string, 'null'], format: date-time}
+    DeployResult:
+      type: object
+      properties:
+        release: {$ref: '#/components/schemas/Release'}
+        attestation: {oneOf: [{$ref: '#/components/schemas/GatewayStatus'}, {type: 'null'}]}
+        rolledBackToPrevious: {type: boolean}
+    Envelope:
+      type: object
+      required: [digest, document]
+      properties:
+        digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        document: {type: object}
+    AuditEvent:
+      type: object
+      properties:
+        id: {type: integer}
+        at: {type: string, format: date-time}
+        subject: {type: string}
+        action: {type: string}
+        resourceId: {type: [string, 'null']}
+        detail: {}
+    InvocationRecord:
+      type: object
+      required: [at, subject, tool, decision, outcome]
+      properties:
+        at: {type: string, format: date-time}
+        releaseDigest: {type: string}
+        subject: {type: string}
+        authMethod: {type: string}
+        method: {type: string, enum: [tools/call, prompts/get, resources/read, completion/complete]}
+        tool: {type: string, description: 'tool or prompt name, or resource URI, as requested'}
+        target: {type: string}
+        decision: {type: string, enum: [ALLOW, DENY]}
+        outcome: {type: string, enum: [OK, TOOL_ERROR, RPC_ERROR, STREAMED, NOT_DELIVERED, UNKNOWN, DENIED, INVALID_ARGUMENTS]}
+        latencyMs: {type: integer}
+        traceId: {type: string}
+        argsDigest: {type: string}
+    Invocation:
+      allOf:
+        - $ref: '#/components/schemas/InvocationRecord'
+        - type: object
+          properties:
+            id: {type: integer}
+            gatewayId: {type: string}

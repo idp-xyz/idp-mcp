@@ -72,7 +72,18 @@ func scratchDB(t *testing.T) (ownerURL, serviceURL string) {
 		t.Fatal(err)
 	}
 	u.User = url.UserPassword("idp_mcp_it_svc", "it-service-password")
+	owners[u.String()] = ownerURL
 	return ownerURL, u.String()
+}
+
+var owners = map[string]string{}
+
+func ownerFor(t *testing.T, serviceURL string) string {
+	o, ok := owners[serviceURL]
+	if !ok {
+		t.Fatal("unknown scratch database")
+	}
+	return o
 }
 
 // ---- upstream --------------------------------------------------------------------------------
@@ -87,7 +98,13 @@ func (u *upstream) setDesc(d string) { u.mu.Lock(); u.desc = d; u.mu.Unlock() }
 
 func newUpstream(t *testing.T) *upstream {
 	u := &upstream{desc: "Return the text unchanged"}
-	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	u.srv = httptest.NewServer(u.handler())
+	t.Cleanup(u.srv.Close)
+	return u
+}
+
+func (u *upstream) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		var req struct {
 			ID     json.RawMessage `json:"id"`
@@ -117,9 +134,7 @@ func newUpstream(t *testing.T) *upstream {
 			w.WriteHeader(404)
 			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(req.ID)+`,"error":{"code":-32601,"message":"Method not found"}}`)
 		}
-	}))
-	t.Cleanup(u.srv.Close)
-	return u
+	})
 }
 
 // ---- admin client ----------------------------------------------------------------------------
@@ -128,6 +143,7 @@ type admin struct {
 	t      *testing.T
 	base   string
 	tenant string
+	client *http.Client // default http.DefaultClient
 }
 
 func (a admin) token(sub string, roles ...string) string {
@@ -148,7 +164,11 @@ func (a admin) do(tok, method, path string, body any, want int) map[string]any {
 	req, _ := http.NewRequest(method, a.base+path, rd)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	c := a.client
+	if c == nil {
+		c = http.DefaultClient
+	}
+	resp, err := c.Do(req)
 	if err != nil {
 		a.t.Fatal(err)
 	}

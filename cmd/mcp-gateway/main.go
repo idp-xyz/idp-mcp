@@ -13,6 +13,12 @@
 //	IDP_CALL_TIMEOUT           per tools/call (default 60s)
 //	IDP_DRIFT_INTERVAL         catalog drift checks (default 60s)
 //	IDP_LOG_LEVEL              debug | info | warn | error
+//	IDP_GATEWAY_TLS_CERT_FILE / IDP_GATEWAY_TLS_KEY_FILE   serve /mcp over HTTPS
+//	IDP_REGISTRY_CA_FILE       extra trusted CAs for the registry
+//	IDP_GATEWAY_CLIENT_CERT_FILE / IDP_GATEWAY_CLIENT_KEY_FILE   mutual TLS to the registry
+//	                           (certificate URI SAN spiffe://idp-mcp/gateway/<IDP_GATEWAY_ID>)
+//	IDP_UPSTREAM_CA_FILE       extra trusted CAs for https MCP servers
+//	IDP_IDENTITY_CA_FILE       extra trusted CAs for the JWKS endpoint
 package main
 
 import (
@@ -33,6 +39,7 @@ import (
 	"idp-mcp/internal/observability"
 	"idp-mcp/internal/release"
 	"idp-mcp/internal/server"
+	"idp-mcp/internal/transport"
 )
 
 var version = "0.1.0-dev"
@@ -95,8 +102,18 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	upstreamTLS, err := transport.ClientTLS(env("IDP_UPSTREAM_CA_FILE", ""), "", "")
+	if err != nil {
+		return fmt.Errorf("IDP_UPSTREAM_CA_FILE: %w", err)
+	}
+	identityTLS, err := transport.ClientTLS(env("IDP_IDENTITY_CA_FILE", ""), "", "")
+	if err != nil {
+		return fmt.Errorf("IDP_IDENTITY_CA_FILE: %w", err)
+	}
 	cfg := gateway.Config{GatewayID: id, Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: version},
-		DevMode: env("IDP_DEV_MODE", "false") == "true", AllowedHosts: hosts,
+		UpstreamTLS:  upstreamTLS,
+		IdentityHTTP: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: identityTLS}},
+		DevMode:      env("IDP_DEV_MODE", "false") == "true", AllowedHosts: hosts,
 		CallTimeout: duration("IDP_CALL_TIMEOUT", 60*time.Second), DriftInterval: duration("IDP_DRIFT_INTERVAL", time.Minute), Log: log}
 	var sync *gateway.RegistrySync
 	var batcher *invocation.Batcher
@@ -141,8 +158,19 @@ func run(log *slog.Logger) error {
 
 	srv := &http.Server{Addr: env("IDP_GATEWAY_LISTEN", "127.0.0.1:3220"), Handler: g.Handler(),
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
+	if cert := env("IDP_GATEWAY_TLS_CERT_FILE", ""); cert != "" {
+		if srv.TLSConfig, err = transport.ServerTLS(cert, env("IDP_GATEWAY_TLS_KEY_FILE", ""), ""); err != nil {
+			return fmt.Errorf("TLS: %w", err)
+		}
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
+	go func() {
+		if srv.TLSConfig != nil {
+			errc <- srv.ListenAndServeTLS("", "")
+		} else {
+			errc <- srv.ListenAndServe()
+		}
+	}()
 	log.Info("mcp-gateway listening", "addr", srv.Addr, "gateway", id, "mode", map[bool]string{true: "static", false: "registry"}[file != ""])
 	select {
 	case err := <-errc:

@@ -6,6 +6,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,8 +24,9 @@ import (
 const MaxResponse = 4 << 20
 
 // NewHTTPClient returns an http.Client whose connections pass pol.DialControl for the host being
-// dialed, follows no redirects and ignores HTTP(S)_PROXY.
-func NewHTTPClient(pol *policy.Upstream, timeout time.Duration) *http.Client {
+// dialed, follows no redirects and ignores HTTP(S)_PROXY. tlsCfg (optional) carries extra trusted
+// CAs for https upstreams on private networks.
+func NewHTTPClient(pol *policy.Upstream, timeout time.Duration, tlsCfg ...*tls.Config) *http.Client {
 	tr := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -40,6 +42,9 @@ func NewHTTPClient(pol *policy.Upstream, timeout time.Duration) *http.Client {
 		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: timeout,
 		DisableCompression:    true,
+	}
+	if len(tlsCfg) > 0 && tlsCfg[0] != nil {
+		tr.TLSClientConfig = tlsCfg[0].Clone()
 	}
 	return &http.Client{Transport: tr, Timeout: 0, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse

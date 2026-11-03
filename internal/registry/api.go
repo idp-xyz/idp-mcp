@@ -26,6 +26,9 @@ type API struct {
 	Svc   *Service
 	Admin AdminAuth
 	Log   *slog.Logger
+	// RequireGatewayCert binds gateway credentials to mutual TLS: the internal API then also needs a
+	// verified client certificate whose spiffe://idp-mcp/gateway/<id> URI names the token's gateway.
+	RequireGatewayCert bool
 }
 
 type adminHandler func(r *http.Request, p Principal) (int, any, error)
@@ -78,9 +81,28 @@ func one[T any](v T, err error) (int, any, error) { return http.StatusOK, v, err
 
 func created[T any](v T, err error) (int, any, error) { return http.StatusCreated, v, err }
 
+// Routes lists the method+path patterns the handler serves (documented in api/openapi.yaml;
+// tests/api keeps the two in step).
+func (a *API) Routes() []string {
+	var out []string
+	a.routes(func(pattern string, _ http.HandlerFunc) { out = append(out, pattern) })
+	return out
+}
+
 // Handler returns the registry HTTP handler.
 func (a *API) Handler() http.Handler {
 	m := http.NewServeMux()
+	a.routes(func(pattern string, h http.HandlerFunc) { m.HandleFunc(pattern, h) })
+	m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		transport.WriteJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+	})
+	return m
+}
+
+func (a *API) routes(handle func(pattern string, h http.HandlerFunc)) {
+	m := struct {
+		HandleFunc func(string, http.HandlerFunc)
+	}{handle}
 	m.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		if err := a.Svc.Store.Pool.Ping(r.Context()); err != nil {
 			transport.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "database unavailable"})
@@ -221,10 +243,6 @@ func (a *API) Handler() http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		transport.WriteJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
-	})
-	return m
 }
 
 func (a *API) gatewayAuth(h func(w http.ResponseWriter, r *http.Request, gatewayID, tenant string)) http.HandlerFunc {
@@ -243,6 +261,13 @@ func (a *API) gatewayAuth(h func(w http.ResponseWriter, r *http.Request, gateway
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			transport.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
+		}
+		if a.RequireGatewayCert {
+			if id := transport.GatewayIdentity(r.TLS); id != gw {
+				a.Log.Warn("gateway credential without a matching client certificate", "gateway", gw, "certificate", id)
+				transport.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+				return
+			}
 		}
 		h(w, r, gw, tenant)
 	}

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,7 @@ type Config struct {
 	Recorder      invocation.Recorder
 	Dropped       func() int64 // invocation records lost, reported in Status
 	IdentityHTTP  *http.Client // JWKS fetches
+	UpstreamTLS   *tls.Config  // extra trusted CAs for https upstreams (optional)
 	Log           *slog.Logger
 }
 
@@ -187,7 +189,7 @@ func (g *Gateway) activate(env *release.Envelope) error {
 		}
 	}
 	st := &state{env: env, doc: doc, auth: auth, policy: authorization.Compile(doc), router: routing.New(doc), args: args,
-		upstream: &client.Client{HTTP: client.NewHTTPClient(policy.ForTargets(hosts, g.cfg.DevMode), g.cfg.CallTimeout), Info: g.cfg.Info},
+		upstream: &client.Client{HTTP: client.NewHTTPClient(policy.ForTargets(hosts, g.cfg.DevMode), g.cfg.CallTimeout, g.cfg.UpstreamTLS), Info: g.cfg.Info},
 		loadedAt: time.Now().UTC(), targets: map[string]TargetStatus{}}
 	for _, t := range doc.Targets {
 		st.targets[t.Name] = TargetStatus{Name: t.Name, Status: TargetPending}
