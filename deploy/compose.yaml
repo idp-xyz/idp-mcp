@@ -1,0 +1,115 @@
+# idp-mcp development topology: registry-service + mcp-gateway + PostgreSQL + two real MCP SDK
+# servers as upstreams (minimal: Node SDK echo/sum; reference: Python SDK Everything Server, from the
+# idp-fixture-upstream test-double image). Driven by deploy/e2e.sh, which generates the secrets in
+# .local/compose.env (0600). The host sees only 127.0.0.1:3320 (gateway) and 127.0.0.1:8250 (registry).
+# DEV ONLY: HS256 admin tokens, plaintext http on the private upstream network.
+name: idp-mcp-go
+
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ['no-new-privileges:true']
+
+x-db: &db
+  IDP_MIGRATION_DATABASE_URL: postgres://postgres:${IDP_PG_OWNER_PASSWORD:?run deploy/e2e.sh}@postgres:5432/postgres?sslmode=disable
+  IDP_APP_DB_PASSWORD: ${IDP_APP_DB_PASSWORD:?run deploy/e2e.sh}
+  IDP_DEV_MODE: 'true'
+  IDP_DEV_ADMIN_SECRET: ${IDP_DEV_ADMIN_SECRET:?run deploy/e2e.sh}
+
+networks:
+  edge: {}                     # published ports only
+  upstream: {internal: true}   # gateway, registry (discovery), upstream MCP servers
+  data: {internal: true}       # registry, postgres
+
+volumes:
+  pgdata: {}
+
+services:
+  postgres:
+    image: ${IDP_PG_IMAGE:-public.ecr.aws/docker/library/postgres:17-alpine}
+    networks: [data]
+    environment:
+      POSTGRES_PASSWORD: ${IDP_PG_OWNER_PASSWORD:?run deploy/e2e.sh}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U postgres']   # TCP: not the init-time socket-only server
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # one-shot owner commands: migrate | ensure-login USER | seed-tenant SLUG | dev-token ...
+  registry-admin:
+    <<: *hardened
+    image: ${IDP_IMAGE:-idp-mcp:dev}
+    profiles: [tools]
+    entrypoint: [/usr/local/bin/registry-service]
+    networks: [data]
+    environment: *db
+    depends_on: {postgres: {condition: service_healthy}}
+
+  registry:
+    <<: *hardened
+    image: ${IDP_IMAGE:-idp-mcp:dev}
+    entrypoint: [/usr/local/bin/registry-service]
+    command: [serve]
+    networks: [edge, upstream, data]
+    ports: ['127.0.0.1:8250:8250']
+    environment:
+      IDP_DATABASE_URL: postgres://idp_mcp_svc:${IDP_APP_DB_PASSWORD:?run deploy/e2e.sh}@postgres:5432/postgres?sslmode=disable
+      IDP_REGISTRY_LISTEN: 0.0.0.0:8250
+      IDP_DEV_MODE: 'true'
+      IDP_DEV_ADMIN_SECRET: ${IDP_DEV_ADMIN_SECRET:?run deploy/e2e.sh}
+      # MODE=jwt: admin tokens from Keycloak, verified with its JWKS (the dev secret is then unused)
+      IDP_ADMIN_JWKS_URL: ${IDP_ADMIN_JWKS_URL:-}
+      IDP_ADMIN_ISSUER: ${IDP_ADMIN_ISSUER:-idp-mcp-dev}
+      IDP_ALLOWED_UPSTREAM_HOSTS: minimal,reference
+      IDP_PRIVATE_UPSTREAM_HOSTS: minimal,reference
+    depends_on: {postgres: {condition: service_healthy}}
+
+  mcp-gateway:
+    <<: *hardened
+    image: ${IDP_IMAGE:-idp-mcp:dev}
+    entrypoint: [/usr/local/bin/mcp-gateway]
+    networks: [edge, upstream]
+    ports: ['127.0.0.1:3320:3320']
+    tmpfs: ['/var/cache/idp:uid=10001,gid=10001,mode=0700']
+    environment:
+      IDP_GATEWAY_ID: ${IDP_GATEWAY_ID:-pending}
+      IDP_GATEWAY_TOKEN: ${IDP_GATEWAY_TOKEN:-pending}
+      IDP_REGISTRY_URL: http://registry:8250
+      IDP_GATEWAY_LISTEN: 0.0.0.0:3320
+      IDP_RELEASE_CACHE: /var/cache/idp/release.json
+      # no IDP_DEV_MODE: the upstreams are on the private network, not loopback
+    depends_on: [registry, minimal, reference]
+
+  # development identity provider for MODE=jwt (deploy/keycloak/realm.py generates the realm).
+  # Issuer = the URL clients use (http://127.0.0.1:7080/realms/idp); containers fetch the JWKS
+  # over the private name keycloak:7080 (backchannel). TEST DOUBLE: start-dev, no TLS.
+  keycloak:
+    image: ${IDP_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.8.1}
+    profiles: [jwt]
+    command: [start-dev, --import-realm]
+    networks: [edge, upstream]
+    ports: ['127.0.0.1:7080:7080']
+    environment:
+      KC_HTTP_PORT: '7080'
+      KC_HOSTNAME: http://127.0.0.1:7080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: 'true'
+    volumes: ['../.local/keycloak:/opt/keycloak/data/import:ro']
+    healthcheck:
+      test: ['CMD', 'bash', '-c', 'exec 3<>/dev/tcp/127.0.0.1/7080']
+      interval: 3s
+      timeout: 3s
+      retries: 80
+
+  minimal:
+    <<: *hardened
+    image: ${IDP_FIXTURE_IMAGE:-idp-fixture-upstream:local}
+    command: [minimal]
+    networks: [upstream]
+
+  reference:
+    <<: *hardened
+    image: ${IDP_FIXTURE_IMAGE:-idp-fixture-upstream:local}
+    command: [reference]
+    networks: [upstream]
