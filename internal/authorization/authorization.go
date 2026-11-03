@@ -17,6 +17,11 @@ type Principal struct {
 	Method  string    // "api-key" or "jwt"
 	KeyID   string    // api-key id, if any
 	Expires time.Time // credential expiry (JWT exp); zero for API keys
+	// Client is the OAuth client the token was issued to (azp); Actor the party acting for the
+	// subject in a delegated token (RFC 8693 act claim: client_id, else sub). Audit only: grants are
+	// decided on Subject, Tenant and Roles.
+	Client string
+	Actor  string
 }
 
 // Policy is the compiled grant set of one release.

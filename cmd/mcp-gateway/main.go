@@ -137,8 +137,12 @@ func run(log *slog.Logger) error {
 	var sync *gateway.RegistrySync
 	var batcher *invocation.Batcher
 	if registry != "" {
+		registryTLS, err := transport.ClientTLS(env("IDP_REGISTRY_CA_FILE", ""), env("IDP_GATEWAY_CLIENT_CERT_FILE", ""), env("IDP_GATEWAY_CLIENT_KEY_FILE", ""))
+		if err != nil {
+			return fmt.Errorf("registry TLS: %w", err)
+		}
 		sync = &gateway.RegistrySync{BaseURL: registry, Token: token, CacheFile: env("IDP_RELEASE_CACHE", ""), Log: log,
-			HTTP:         &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: nil}},
+			HTTP:         &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: registryTLS}},
 			PollInterval: duration("IDP_POLL_INTERVAL", 2*time.Second), HeartbeatInterval: duration("IDP_HEARTBEAT_INTERVAL", 2*time.Second)}
 		batcher = invocation.NewBatcher(sync.Sink(), log)
 	} else {

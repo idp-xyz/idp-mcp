@@ -478,8 +478,10 @@ components:
         at: {type: string, format: date-time}
         releaseDigest: {type: string}
         subject: {type: string}
+        client: {type: string, description: OAuth client the token was issued to (azp)}
+        actor: {type: string, description: delegated caller of an RFC 8693 token (act.client_id or act.sub)}
         authMethod: {type: string}
-        method: {type: string, enum: [tools/call, prompts/get, resources/read, completion/complete]}
+        method: {type: string, enum: [tools/call, prompts/get, resources/read, completion/complete, tasks/get, tasks/update, tasks/cancel]}
         tool: {type: string, description: 'tool or prompt name, or resource URI, as requested'}
         target: {type: string}
         decision: {type: string, enum: [ALLOW, DENY]}

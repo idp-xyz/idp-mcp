@@ -134,7 +134,7 @@ func (g *Gateway) recorder(r *http.Request, st *state, pr authorization.Principa
 	start := time.Now()
 	span := trace.SpanFromContext(r.Context())
 	span.SetAttributes(attribute.String("mcp.name", name))
-	rec := invocation.Record{At: start.UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject, AuthMethod: pr.Method,
+	rec := invocation.Record{At: start.UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject, Client: pr.Client, Actor: pr.Actor, AuthMethod: pr.Method,
 		Method: req.Method, Tool: name, TraceID: observability.TraceID(r.Context())}
 	return func(target, decision, outcome string) {
 		rec.Target, rec.Decision, rec.Outcome, rec.LatencyMS = target, decision, outcome, time.Since(start).Milliseconds()

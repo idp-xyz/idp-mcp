@@ -214,6 +214,8 @@ type Invocation struct {
 	At            time.Time `json:"at"`
 	ReleaseDigest string    `json:"releaseDigest"`
 	Subject       string    `json:"subject"`
+	Client        *string   `json:"client"`
+	Actor         *string   `json:"actor"`
 	AuthMethod    string    `json:"authMethod"`
 	Method        string    `json:"method"`
 	Tool          string    `json:"tool"`

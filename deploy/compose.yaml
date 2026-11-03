@@ -64,6 +64,11 @@ services:
       IDP_ADMIN_ISSUER: ${IDP_ADMIN_ISSUER:-idp-mcp-dev}
       IDP_ALLOWED_UPSTREAM_HOSTS: minimal,reference
       IDP_PRIVATE_UPSTREAM_HOSTS: minimal,reference
+      # MODE=oidc: TLS everywhere (certificates issued by deploy/e2e.sh into .local/tls)
+      IDP_TLS_CERT_FILE: ${IDP_REGISTRY_TLS_CERT:-}
+      IDP_TLS_KEY_FILE: ${IDP_REGISTRY_TLS_KEY:-}
+      IDP_IDENTITY_CA_FILE: ${IDP_IDENTITY_CA:-}
+    volumes: ['../.local/tls:/etc/idp/tls:ro']
     depends_on: {postgres: {condition: service_healthy}}
 
   mcp-gateway:
@@ -76,10 +81,16 @@ services:
     environment:
       IDP_GATEWAY_ID: ${IDP_GATEWAY_ID:-pending}
       IDP_GATEWAY_TOKEN: ${IDP_GATEWAY_TOKEN:-pending}
-      IDP_REGISTRY_URL: http://registry:8250
+      IDP_REGISTRY_URL: ${IDP_REGISTRY_URL_INTERNAL:-http://registry:8250}
       IDP_GATEWAY_LISTEN: 0.0.0.0:3320
       IDP_RELEASE_CACHE: /var/cache/idp/release.json
       # no IDP_DEV_MODE: the upstreams are on the private network, not loopback
+      IDP_GATEWAY_TLS_CERT_FILE: ${IDP_GATEWAY_TLS_CERT:-}
+      IDP_GATEWAY_TLS_KEY_FILE: ${IDP_GATEWAY_TLS_KEY:-}
+      IDP_REGISTRY_CA_FILE: ${IDP_IDENTITY_CA:-}
+      IDP_IDENTITY_CA_FILE: ${IDP_IDENTITY_CA:-}
+      IDP_METRICS_LISTEN: 0.0.0.0:9464
+    volumes: ['../.local/tls:/etc/idp/tls:ro']
     depends_on: [registry, minimal, reference]
 
   # development identity provider for MODE=jwt (deploy/keycloak/realm.py generates the realm).
@@ -101,6 +112,33 @@ services:
       interval: 3s
       timeout: 3s
       retries: 80
+
+  # MODE=oidc: Keycloak in PRODUCTION mode - HTTPS only, PostgreSQL, standard token exchange (GA) and
+  # delegation (preview) enabled. Issuer https://localhost:8443/realms/idp; containers reach it as
+  # https://keycloak:8443 (backchannel) and trust the development CA.
+  keycloak-prod:
+    image: ${IDP_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.8.1}
+    profiles: [oidc]
+    command: [start, --db, postgres, --db-url, 'jdbc:postgresql://postgres:5432/keycloak', --db-username, postgres,
+              --db-password, '${IDP_PG_OWNER_PASSWORD:?run deploy/e2e.sh}', --https-certificate-file, /etc/idp/tls/keycloak.crt,
+              --https-certificate-key-file, /etc/idp/tls/keycloak.key, --https-port, '8443', --hostname, 'https://localhost:8443',
+              --hostname-backchannel-dynamic, 'true', --http-enabled, 'false',
+              --features, 'token-exchange-standard,token-exchange-delegation,parameterized-scopes', --import-realm]
+    networks:   # reachable as `keycloak` like the dev-mode service, so the JWKS URL is the same shape
+      edge: {aliases: [keycloak]}
+      upstream: {aliases: [keycloak]}
+      data: {}
+    ports: ['127.0.0.1:8443:8443']
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:-admin}
+    volumes: ['../.local/keycloak:/opt/keycloak/data/import:ro', '../.local/tls:/etc/idp/tls:ro']
+    depends_on: {postgres: {condition: service_healthy}}
+    healthcheck:
+      test: ['CMD', 'bash', '-c', 'exec 3<>/dev/tcp/127.0.0.1/8443']
+      interval: 3s
+      timeout: 3s
+      retries: 100
 
   minimal:
     <<: *hardened

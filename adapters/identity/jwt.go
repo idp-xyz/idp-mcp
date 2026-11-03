@@ -191,7 +191,14 @@ func (a *JWTAuth) Authenticate(ctx context.Context, bearer string) (authorizatio
 	if exp, err := claims.GetExpirationTime(); err == nil && exp != nil {
 		expires = exp.Time
 	}
-	return authorization.Principal{Subject: sub, Tenant: tenant, Roles: roles, Method: "jwt", Expires: expires}, nil
+	azp, _ := claims["azp"].(string)
+	var actor string
+	if act, ok := claims["act"].(map[string]any); ok {
+		if actor, _ = act["client_id"].(string); actor == "" {
+			actor, _ = act["sub"].(string)
+		}
+	}
+	return authorization.Principal{Subject: sub, Tenant: tenant, Roles: roles, Method: "jwt", Expires: expires, Client: azp, Actor: actor}, nil
 }
 
 // Challenge implements Authenticator: points the client at the RFC 9728 metadata.

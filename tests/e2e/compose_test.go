@@ -23,6 +23,7 @@ import (
 type env struct {
 	t                                            *testing.T
 	registry, gateway, tenant, gatewayID, secret string
+	http                                         *http.Client // trusts IDP_E2E_CA when set
 }
 
 func setup(t *testing.T) *env {
@@ -30,6 +31,12 @@ func setup(t *testing.T) *env {
 		tenant: os.Getenv("IDP_E2E_TENANT"), gatewayID: os.Getenv("IDP_E2E_GATEWAY_ID"), secret: os.Getenv("IDP_E2E_ADMIN_SECRET")}
 	if e.registry == "" {
 		t.Skip("run through deploy/e2e.sh")
+	}
+	e.http = &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	if ca := os.Getenv("IDP_E2E_CA"); ca != "" {
+		if cfg, err := transport.ClientTLS(ca, "", ""); err == nil {
+			e.http.Transport = &http.Transport{Proxy: nil, TLSClientConfig: cfg}
+		}
 	}
 	return e
 }
@@ -52,7 +59,7 @@ func (e *env) api(tok, method, path string, body any, want int) map[string]any {
 	req, _ := http.NewRequest(method, e.registry+path, rd)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	resp, err := e.http.Do(req)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -77,7 +84,7 @@ func (e *env) mcp(key, method, params, name string) (int, map[string]any) {
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := e.http.Do(req)
 	if err != nil {
 		e.t.Fatal(err)
 	}

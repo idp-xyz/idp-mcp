@@ -23,4 +23,5 @@
 ## 已知限制
 
 - 没有集群实测，`kubeconform` 之类的 schema 校验也没有运行（参考主机上安装第三方二进制被拒绝）；`tests/deploy` 只检查清单之间的一致性与加固项。
+- 副本共用网关记录；部署在所有存活副本都运行该 Release 时才 GOOD，滚动更新期间会等待新旧副本一致。
 - NetworkPolicy 中 IdP 和 PostgreSQL 的选择器是示例，要按实际部署改。

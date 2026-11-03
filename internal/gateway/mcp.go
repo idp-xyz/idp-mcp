@@ -232,7 +232,7 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 	}
 	span := trace.SpanFromContext(r.Context())
 	span.SetAttributes(attribute.String("mcp.tool", p.Name))
-	rec := invocation.Record{At: start.UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject, AuthMethod: pr.Method,
+	rec := invocation.Record{At: start.UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject, Client: pr.Client, Actor: pr.Actor, AuthMethod: pr.Method,
 		Method: req.Method, Tool: p.Name, TraceID: observability.TraceID(r.Context())}
 	if len(p.Arguments) > 0 {
 		rec.ArgsDigest, _ = release.Digest(p.Arguments)

@@ -31,6 +31,8 @@ type Record struct {
 	At            time.Time `json:"at"`
 	ReleaseDigest string    `json:"releaseDigest"`
 	Subject       string    `json:"subject"`
+	Client        string    `json:"client,omitempty"` // OAuth client the token was issued to (azp)
+	Actor         string    `json:"actor,omitempty"`  // delegated caller (RFC 8693 act), if any
 	AuthMethod    string    `json:"authMethod"`
 	Method        string    `json:"method"` // tools/call, prompts/get, resources/read, completion/complete
 	Tool          string    `json:"tool"`   // exposed tool or prompt name, or resource URI, as requested

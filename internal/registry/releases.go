@@ -676,6 +676,8 @@ type InvocationInput struct {
 	At            time.Time `json:"at"`
 	ReleaseDigest string    `json:"releaseDigest"`
 	Subject       string    `json:"subject"`
+	Client        string    `json:"client"`
+	Actor         string    `json:"actor"`
 	AuthMethod    string    `json:"authMethod"`
 	Method        string    `json:"method"`
 	Tool          string    `json:"tool"`
@@ -708,9 +710,10 @@ func (s *Service) RecordInvocations(ctx context.Context, gatewayID, tenant strin
 			if r.At.IsZero() || r.Subject == "" || r.Tool == "" || len(r.Tool) > 2048 || len(r.Method) > 64 || (r.Decision != "ALLOW" && r.Decision != "DENY") {
 				return fail(http.StatusBadRequest, "malformed invocation record")
 			}
-			b.Queue(`INSERT INTO invocations (tenant_id, gateway_id, at, release_digest, subject, auth_method, method, tool, target, decision, outcome, latency_ms, trace_id, args_digest)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-				tenant, gatewayID, r.At, r.ReleaseDigest, r.Subject, r.AuthMethod, r.Method, r.Tool, nullable(r.Target), r.Decision, r.Outcome, r.LatencyMS, nullable(r.TraceID), nullable(r.ArgsDigest))
+			b.Queue(`INSERT INTO invocations (tenant_id, gateway_id, at, release_digest, subject, auth_method, method, tool, target, decision, outcome, latency_ms, trace_id, args_digest, client, actor)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+				tenant, gatewayID, r.At, r.ReleaseDigest, r.Subject, r.AuthMethod, r.Method, r.Tool, nullable(r.Target), r.Decision, r.Outcome, r.LatencyMS, nullable(r.TraceID), nullable(r.ArgsDigest),
+				nullable(r.Client), nullable(r.Actor))
 		}
 		return tx.SendBatch(ctx, b).Close()
 	})
@@ -747,7 +750,7 @@ func (s *Service) ListAudit(ctx context.Context, p Principal) ([]AuditEvent, err
 func (s *Service) ListInvocations(ctx context.Context, p Principal) ([]Invocation, error) {
 	var out []Invocation
 	err := s.Store.InTenant(ctx, p.Tenant, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, gateway_id::text, at, release_digest, subject, auth_method, method, tool, target, decision, outcome, latency_ms, trace_id, args_digest
+		rows, err := tx.Query(ctx, `SELECT id, gateway_id::text, at, release_digest, subject, client, actor, auth_method, method, tool, target, decision, outcome, latency_ms, trace_id, args_digest
 			FROM invocations ORDER BY id DESC LIMIT 500`)
 		if err != nil {
 			return err
@@ -755,7 +758,7 @@ func (s *Service) ListInvocations(ctx context.Context, p Principal) ([]Invocatio
 		defer rows.Close()
 		for rows.Next() {
 			var v Invocation
-			if err := rows.Scan(&v.ID, &v.GatewayID, &v.At, &v.ReleaseDigest, &v.Subject, &v.AuthMethod, &v.Method, &v.Tool, &v.Target, &v.Decision,
+			if err := rows.Scan(&v.ID, &v.GatewayID, &v.At, &v.ReleaseDigest, &v.Subject, &v.Client, &v.Actor, &v.AuthMethod, &v.Method, &v.Tool, &v.Target, &v.Decision,
 				&v.Outcome, &v.LatencyMS, &v.TraceID, &v.ArgsDigest); err != nil {
 				return err
 			}

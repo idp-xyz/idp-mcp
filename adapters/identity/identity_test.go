@@ -93,6 +93,13 @@ func TestValidTokensRSAAndECWithRotation(t *testing.T) {
 	if err != nil || p.Subject != "alice" || p.Tenant != "t1" || p.Roles[0] != "operator" || p.Method != "jwt" {
 		t.Fatalf("%+v %v", p, err)
 	}
+	delegated, err := auth.Authenticate(context.Background(), sign(t, jwt.SigningMethodRS256, "rsa-1", k.rsa, claims(func(c jwt.MapClaims) {
+		c["azp"] = "agent-exchange"
+		c["act"] = map[string]any{"sub": "svc-agent", "client_id": "agent-exchange"}
+	})))
+	if err != nil || delegated.Subject != "alice" || delegated.Client != "agent-exchange" || delegated.Actor != "agent-exchange" {
+		t.Fatalf("delegated token: %+v %v", delegated, err)
+	}
 	// key rotation: a new kid is fetched on first sight
 	k.kids.Store([]string{"rsa-1", "ec-1"})
 	if _, err := auth.Authenticate(context.Background(), sign(t, jwt.SigningMethodES256, "ec-1", k.ec, claims(nil))); err != nil {

@@ -163,3 +163,39 @@ Python 版由 FastAPI 控制面、Python 写的 Modern Boundary 和 agentgateway
 - 一个网关记录一个副本；多副本的自证状态合并尚未设计。
 - 没有指标（metrics）导出；调用记录和 span 已包含判定、结果和时延，聚合在采集器一侧完成。
 - 用户授权码流程和 RFC 8693 委派换发仍只在 IdP 侧，网关只校验令牌；生产 Keycloak（TLS、用户登录）未联调。
+
+## 10. M5：五项遗留（2026-11-03，WSL 实测）
+
+决策人 2026-11-03 指定的五项：resources 钉住；多副本自证合并；指标导出；tasks 扩展的真实上游；身份侧（用户授权码流程、RFC 8693 委派换发、生产级 Keycloak）。
+
+**新增决策**
+
+| # | 决策 | 理由 |
+|---|---|---|
+| D34 | **resources 与资源模板钉住**：快照摘要改为 `Catalog{tools, prompts, resources, resourceTemplates}` 的摘要；`resources/list`、`resources/templates/list` 由 Release 生成；`resources/read` 只接受钉住的 URI 或匹配钉住模板的 URI（归属有歧义即视为不存在）；漂移检测覆盖资源列表，封锁同样作用于读取（迁移 0004） | 这是 M2 以来最大的安全缺口：审批后上游增减资源，网关此前看不到 |
+| D35 | **多副本自证合并**：每个副本以实例 id（Pod 名，`IDP_GATEWAY_INSTANCE`，默认主机名）上报；注册服务按（网关, 实例）保存状态（迁移 0005）；部署只有在**所有存活实例**（心跳在 `IDP_INSTANCE_STALE_AFTER`，默认 30 s 之内，且晚于部署开始）都运行该 Release 且目标全部 OK 时才判 GOOD；任一实例拒绝即立即失败；落后的实例在超时时被点名；静默一天的实例被遗忘。Kubernetes 清单改为 2 副本滚动更新 | 一个记录一个副本在生产里站不住；合并规则必须写死且可检验 |
+| D36 | **指标用 Prometheus 文本格式，自写导出（无客户端库），在独立监听器 `IDP_METRICS_LISTEN` 上**：网关有按方法/判定/结果的决策计数、按方法的时延直方图、HTTP 按路由/状态的计数、监听流数、task 绑定数、目标健康、运行中的 Release；注册服务有按路由/状态的 HTTP 计数与部署结果计数。标签只含方法、路由模式、目标、判定、结果，**不含主体、令牌、参数、URI** | 与 D31 同一取舍：供应链小，隐私边界与审计一致；不放在数据面端口上 |
+| D37 | **tasks 扩展用自写的 Go 参考服务器做真实上游**（`tests/fixtures/taskserver`，按 SEP-2663 v2 实现官方场景要求的六个工具），官方的 8 个 tasks 场景先直接打夹具、再经网关各跑一遍；网关补上 `tasks/update` 的路由和 **能力门控**（`_meta.clientCapabilities.extensions` 未声明该扩展时，任何 `tasks/*` 先得到 -32021，连查找都不做） | 没有现成实现：Python SDK 的类型文件明确"无运行时"，Node SDK 2.3.1 与 npm 最新的 2.4.0 的 dist 中都没有该扩展的服务端（已逐文件核对）；官方套件的场景说明足够精确，可以照着实现 |
+| D38 | **身份侧按生产形态联调**：Keycloak 26.8.1 以 `start`（生产模式）运行，HTTPS、PostgreSQL、启用 `token-exchange-standard`（GA）与 `token-exchange-delegation`（预览，需同时启用 `parameterized-scopes`）；注册服务和网关也上 TLS，各自信任开发 CA；真实用户以授权码 + PKCE 经 Keycloak 的登录表单登录；代理客户端以标准令牌交换取得受众为网关资源的令牌（需要在请求方客户端上配该受众的映射），以委派取得带 `act` 的令牌（用户令牌必须带 `may_act: {"sub": <代理的服务账号 id>}`，由管理员配置）。网关校验不变（签名、issuer、受众、租户、角色），新增记录 `azp`（Client）与 `act`（Actor）进调用审计（迁移 0006），授权判定仍只看主体、租户和角色 | 对应 ADR-0001 D15 的第②条路；谁代表谁必须进审计 |
+
+**结果**
+- resources：单元测试（钉住的定义原样返回、审批后新增的资源既不列出也不可读、漂移被检测并封锁读取）；官方符合性在钉住资源后仍 **37/37**；compose 端到端 13/13。
+- 多副本：集成测试 `TestReplicasMustAllAttest`：两副本都在 Release 上才 GOOD；第三个不拉取只心跳的副本让下一次部署失败并被点名，期望状态退回；该副本停止心跳超过窗口后不再计入，再次部署 GOOD；`GET /api/v1/gateways/{id}` 列出实例与存活状态。
+- 指标：单元测试覆盖格式、转义、直方图分桶、按路由计数、不泄露主体和密钥。
+- tasks：官方 tasks 扩展场景 **直接 8/8（42 项检查全部 SUCCESS）、经网关 8/8（42/42）**。
+- 身份：`MODE=oidc bash deploy/e2e.sh` **12/12**：管理 API 经 TLS 且 JWKS 经 TLS 校验；授权码 + PKCE 登录；用户令牌的目录与调用；只读用户目录为空；标准交换的令牌（`sub`=用户、`aud`=网关资源、`azp`=代理）被接受；代理自己的令牌（`aud=account`）被拒；委派令牌（带 `act`）被接受；篡改令牌 401；调用记录区分三种来源（用户直接、代理标准交换、代理委派）。
+- 完整矩阵在最终代码上重跑（见提交信息）。
+
+**实测发现并修复**
+- `COPY --chmod` 会把模式同时施加到自动创建的父目录：`/etc` 变成 0644 后 uid 10001 读不到 `/etc/resolv.conf`，Go 的解析器静默退回 `[::1]:53`，表现为"解析不到 postgres"。改为由构建上下文携带正确模式（`umask 022`、显式 chmod），Dockerfile 不再对 `/etc` 下的文件用 `--chmod`。
+- 构建上下文在 `umask 077` 下拷出的 `ca-certificates.crt` 是 0600，镜像里非 root 读不到系统根证书，只有走 https 时才暴露。
+- `cmd/mcp-gateway` 的注册服务客户端没有接 TLS 配置（M4 的集成测试自己构造了客户端，所以没发现）；compose 的 OIDC 模式跑真实二进制时暴露，已修。
+- 生产模式的 Keycloak 服务名与开发模式不同，容器内按 `keycloak` 取 JWKS 解析失败；用网络别名统一。
+- Keycloak 的委派要求 `may_act` 恰好是 `{"sub": <actor sub>}`（可带 `client_id`），数组或 `azp` 形式都被拒；带 `may_act` 的令牌不能再走标准交换（二者互斥）。
+
+**局限（不标 PASS）**
+- 委派仍是 Keycloak 的预览特性；`may_act` 要为每个代理逐个配置，生产上应由 IdP 侧的策略生成。
+- 开发 CA 与自签证书、Keycloak 的 `dev-file`/单实例 PostgreSQL 只用于联调；用户登录只测了密码表单，没有 MFA、会话注销和刷新令牌。
+- tasks 的真实上游是自写的参考实现，不是第三方实现；`notifications/tasks` 的订阅中继仍只有单元测试（官方场景自己标注待重写）。
+- 指标没有带上租户维度（避免高基数），按租户的用量要从调用记录聚合。
+- 多副本合并只处理"全部存活副本一致"，没有做分批发布（canary）语义。
