@@ -1,6 +1,6 @@
 # idp-mcp
 
-IDP TELOS 的 MCP 基础设施（Go 版）：`mcp-gateway`（数据面）和 `registry-service`（控制面）。只支持 MCP 2026-07-28 modern 模式。设计决策见 [`docs/adr/ADR-0001-go-redesign.md`](docs/adr/ADR-0001-go-redesign.md)。
+IDP TELOS 的 MCP 基础设施：`mcp-gateway`（数据面）和 `registry-service`（控制面）。只支持 MCP 2026-07-28 modern 模式。设计决策见 [`docs/adr/ADR-0001-mcp-infrastructure.md`](docs/adr/ADR-0001-mcp-infrastructure.md)。
 
 状态：**M1–M5 已完成并实测**：工具 / prompts / resources 全部钉住并联邦，completion / subscriptions / tasks 联邦，参数校验，TLS/mTLS，OpenTelemetry 与 Prometheus 指标，多副本自证，OpenAPI，Kubernetes 清单；官方符合性 37/37，官方 tasks 扩展场景 8/8；与生产模式 Keycloak 联调（授权码 + PKCE、RFC 8693 标准交换与委派）。Kubernetes 清单未在集群上应用过。
 
@@ -35,6 +35,7 @@ IDP TELOS 的 MCP 基础设施（Go 版）：`mcp-gateway`（数据面）和 `re
 | `internal/registry`、`audit` | 控制面领域逻辑与 HTTP API、审计 |
 | `internal/invocation`、`observability` | 调用审计批量推送、日志、OpenTelemetry（自写的 OTLP/HTTP JSON 导出器，无 gRPC） |
 | `api/openapi.yaml` | 注册服务的 OpenAPI 3.1（测试保证与路由一致） |
+| `api/contracts/` | 对外发布的契约 `idp.telos.mcp` 1.0.0（Release、Envelope、InvocationRecord 的 JSON Schema；示例由 Go 值生成）。`go test ./internal/release -run TestContract` 保证它与实现一致；发布副本在 `idp-contracts/idp.telos.mcp/1.0.0`，必须与这里逐字节相同 |
 | `adapters/identity`、`adapters/store/postgres` | 身份（API Key、JWT/JWKS、管理令牌）、数据库与迁移执行 |
 | `migrations/` | 数据库结构（含 RLS 策略） |
 | `tests/integration`、`tests/e2e` | 真实 PostgreSQL 上的进程内全链路测试；compose 拓扑上的端到端测试 |
@@ -49,9 +50,10 @@ make conformance        # 官方 MCP 符合性套件（2026-07-28，37 个服务
 bash deploy/e2e.sh      # 构建镜像，起 compose 拓扑（真实 MCP SDK 上游），跑端到端测试；KEEP=1 保留环境
 MODE=jwt bash deploy/e2e.sh   # 同上，身份来自 Keycloak：管理 API 走 JWKS，数据面走 OAuth bearer JWT
 MODE=oidc bash deploy/e2e.sh  # 生产模式 Keycloak（TLS、PostgreSQL）+ 全链路 TLS：真实用户授权码 + PKCE 登录，RFC 8693 标准交换与委派
+go test ./internal/release -run TestContract -update   # 改了 Release / InvocationRecord 后重新生成契约示例（api/contracts/examples.json）
 ```
 
-`deploy/e2e.sh` 需要 `idp-fixture-upstream:local` 镜像，它由 Python 版仓库的 `ops/build_fixtures.sh` 构建。
+`deploy/e2e.sh` 需要 `idp-fixture-upstream:local` 镜像（两个真实 MCP SDK 上游的测试替身），由 `bash deploy/fixtures/build.sh` 构建；来源见该脚本头部。
 
 ## 实测结果（2026-11-02，WSL，Go 1.26.8）
 

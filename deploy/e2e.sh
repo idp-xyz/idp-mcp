@@ -56,7 +56,7 @@ if [[ "$MODE" == jwt || "$MODE" == oidc ]]; then
   fi
 fi
 docker image inspect "${IDP_FIXTURE_IMAGE:-idp-fixture-upstream:local}" >/dev/null 2>&1 \
-  || { echo "BLOCKED: fixture image missing (idp-telos/idp-mcp: bash ops/build_fixtures.sh)" >&2; exit 2; }
+  || { echo "BLOCKED: fixture image missing (bash deploy/fixtures/build.sh)" >&2; exit 2; }
 bash deploy/build.sh idp-mcp:dev
 "${C[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
 cleanup() { [[ "${KEEP:-0}" == 1 ]] || "${C[@]}" down -v --remove-orphans >/dev/null 2>&1; }

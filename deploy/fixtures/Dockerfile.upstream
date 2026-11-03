@@ -1,0 +1,17 @@
+# TEST DOUBLE, not a product image: the two MCP upstreams the end-to-end suite calls, as containers
+# on private service names (minimal :3111 = Node SDK echo/sum, reference :3221 = Python Everything
+# Server). Built by deploy/fixtures/build.sh with --network none from copies it patches to listen on
+# 0.0.0.0 and to accept service-name Host headers (the originals are localhost-only by design).
+ARG BASE=public.ecr.aws/docker/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+FROM ${BASE}
+RUN useradd --system --uid 10001 --user-group --home-dir /opt --shell /usr/sbin/nologin fixture
+COPY node /usr/local/bin/node
+COPY minimal /opt/minimal
+COPY pysdk /opt/pysdk
+COPY reference_main.py /opt/reference_main.py
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/pysdk/site-packages:/opt/pysdk/src:/opt/pysdk/src/mcp-types:/opt/pysdk/everything
+USER 10001:10001
+WORKDIR /opt/minimal
+EXPOSE 3111 3221
+# docker run IMAGE minimal | reference
+ENTRYPOINT ["/bin/sh", "-c", "case \"$1\" in minimal) exec node /opt/minimal/src/sdk/server.mjs;; reference) exec python /opt/reference_main.py;; *) echo 'usage: minimal|reference' >&2; exit 2;; esac", "--"]

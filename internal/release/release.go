@@ -170,11 +170,14 @@ type Envelope struct {
 	Document json.RawMessage `json:"document"`
 }
 
-// Seal computes the digest of a validated document and wraps it.
+// Seal computes the digest of a validated document and wraps it. Nil collections are replaced by
+// empty ones first, so a sealed document never contains null where the published contract
+// (api/contracts/schema.json, idp.telos.mcp 1.0.0) says array.
 func Seal(d *Document) (*Envelope, error) {
 	if err := d.Validate(); err != nil {
 		return nil, err
 	}
+	d.normalize()
 	raw, err := Canonical(d)
 	if err != nil {
 		return nil, err
@@ -206,6 +209,45 @@ func Open(e *Envelope) (*Document, error) {
 		return nil, err
 	}
 	return &d, nil
+}
+
+// normalize replaces nil collections with empty ones (JSON null with []).
+func (d *Document) normalize() {
+	if d.Targets == nil {
+		d.Targets = []Target{}
+	}
+	if d.Grants == nil {
+		d.Grants = []Grant{}
+	}
+	for i := range d.Targets {
+		t := &d.Targets[i]
+		if t.Tools == nil {
+			t.Tools = []server.Tool{}
+		}
+		if t.Prompts == nil {
+			t.Prompts = []server.Prompt{}
+		}
+		if t.Capabilities == nil {
+			t.Capabilities = []string{}
+		}
+	}
+	for i := range d.Grants {
+		g := &d.Grants[i]
+		if g.Tools == nil {
+			g.Tools = []string{}
+		}
+		if g.Roles == nil {
+			g.Roles = []string{}
+		}
+	}
+	for i := range d.Auth.APIKeys {
+		if d.Auth.APIKeys[i].Roles == nil {
+			d.Auth.APIKeys[i].Roles = []string{}
+		}
+	}
+	if d.Auth.JWT != nil && d.Auth.JWT.AuthorizationServers == nil {
+		d.Auth.JWT.AuthorizationServers = []string{}
+	}
 }
 
 // ExposedName is the tool name clients see.

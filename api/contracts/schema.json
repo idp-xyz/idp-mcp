@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:idp:telos:mcp:1.0.0",
+  "title": "idp.telos.mcp 1.0.0",
+  "description": "idp-mcp（MCP 基础设施）对外发布的契约：Release（网关唯一运行的不可变配置，ADR-0001 D2）、Envelope（Release 加内容摘要，注册服务与网关之间、以及导出时的形态）和 InvocationRecord（网关对每次调用的判定记录，ADR-0001 D11）。生产者是 idp-mcp，权威副本在 idp-mcp/api/contracts/，由 go test ./internal/release -run TestContract 保证与实现一致；idp-contracts 中的副本只能与之逐字节相同。JSON Schema 只描述形状与可本地判定的规则；摘要是否匹配、名字是否跨目标唯一、授权是否引用了存在的工具等由 release.Document.Validate 判定。",
+  "oneOf": [
+    {"$ref": "#/$defs/Release"},
+    {"$ref": "#/$defs/Envelope"},
+    {"$ref": "#/$defs/InvocationRecord"}
+  ],
+  "$defs": {
+    "Release": {
+      "title": "Release",
+      "description": "一个网关的完整期望状态：钉住的上游目录（targets）、授权（grants）与数据面认证配置（auth）。由注册服务从已批准的服务器快照和已批准的授权编译而成，经他人审批后才可部署；内容寻址（见 Envelope），网关不运行摘要不匹配的 Release。schemaVersion 固定为 idp.mcp.release/v1。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "releaseId", "tenantId", "gatewayId", "createdAt", "createdBy", "targets", "grants", "auth", "driftAction", "toolNaming"],
+      "properties": {
+        "schemaVersion": {"const": "idp.mcp.release/v1"},
+        "releaseId": {"type": "string", "minLength": 1},
+        "tenantId": {"type": "string", "minLength": 1},
+        "gatewayId": {"type": "string", "minLength": 1},
+        "createdAt": {"type": "string", "format": "date-time", "description": "RFC 3339，UTC"},
+        "createdBy": {"type": "string", "minLength": 1},
+        "approvedBy": {"type": "string", "minLength": 1, "description": "审批人；审批后写入，参与摘要"},
+        "targets": {"type": "array", "items": {"$ref": "#/$defs/Target"}},
+        "grants": {"type": "array", "items": {"$ref": "#/$defs/Grant"}},
+        "auth": {"$ref": "#/$defs/Auth"},
+        "driftAction": {"enum": ["block", "report"], "description": "上游实时目录与钉住的目录不一致时：block 封锁该目标（默认），report 只上报"},
+        "toolNaming": {"enum": ["prefixed", "native"], "description": "prefixed 对外暴露 <target>__<name>；native 原样暴露上游名字，要求跨目标唯一"}
+      }
+    },
+    "Target": {
+      "title": "Target",
+      "description": "一个上游 MCP 服务器及其钉住的、经审批的目录：工具、prompts、resources 与资源模板（ADR-0001 D34）。snapshotDigest 是 {tools, prompts, resources, resourceTemplates} 规范化 JSON 的 SHA-256，网关据此检测漂移。network 是注册服务为该端点批准的地址类别，网关只允许拨到该类别。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "serverId", "endpoint", "network", "snapshotDigest", "tools", "prompts", "capabilities"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$", "description": "目标名，不含下划线，用作 prefixed 命名的前缀"},
+        "serverId": {"type": "string", "minLength": 1},
+        "endpoint": {"type": "string", "format": "uri", "pattern": "^https?://[^/?#@\\s]+(/[^?#\\s]*)?$", "description": "http(s) URL，不含凭据、查询与片段"},
+        "network": {"enum": ["public", "private", "loopback"]},
+        "snapshotDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "tools": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Tool"}, "description": "原生名字"},
+        "prompts": {"type": "array", "items": {"$ref": "#/$defs/Prompt"}, "description": "原生名字；没有 prompts 能力时为空"},
+        "resources": {"type": "array", "items": {"$ref": "#/$defs/Resource"}},
+        "resourceTemplates": {"type": "array", "items": {"$ref": "#/$defs/ResourceTemplate"}},
+        "capabilities": {
+          "type": "array",
+          "items": {"enum": ["tools", "prompts", "resources", "completions", "resources.subscribe", "resources.listChanged", "tasks"]},
+          "description": "审批时服务器在 server/discover 中声明的、被联邦的能力；tasks 表示声明了 io.modelcontextprotocol/tasks 扩展"
+        }
+      }
+    },
+    "Tool": {
+      "title": "Tool",
+      "description": "钉住的 MCP 工具定义（tools/list 条目）。name 与 inputSchema 必填；网关不解释的字段（icons、execution、_meta 及未来新增）原样保留并参与摘要，所以审批人看到的定义就是完整定义。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "inputSchema"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "inputSchema": {"type": "object", "description": "JSON Schema；网关按它校验每次 tools/call 的参数，不加载外部引用"},
+        "outputSchema": {"type": "object"},
+        "annotations": {"type": "object"}
+      }
+    },
+    "Prompt": {
+      "title": "Prompt",
+      "description": "钉住的 MCP prompt 定义（prompts/list 条目）。每个 argument 必须有 name；其余字段原样保留。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "arguments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "description": {"type": "string"},
+              "required": {"type": "boolean"}
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "Resource": {
+      "title": "Resource",
+      "description": "钉住的 MCP resource（resources/list 条目）。resources/read 只接受钉住的 URI 或匹配钉住模板的 URI。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["uri", "name"],
+      "properties": {
+        "uri": {"type": "string", "format": "uri", "minLength": 1, "maxLength": 2048},
+        "name": {"type": "string"},
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "mimeType": {"type": "string"}
+      }
+    },
+    "ResourceTemplate": {
+      "title": "ResourceTemplate",
+      "description": "钉住的 MCP 资源模板（resources/templates/list 条目），RFC 6570 URI 模板。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["uriTemplate", "name"],
+      "properties": {
+        "uriTemplate": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "name": {"type": "string"},
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "mimeType": {"type": "string"}
+      }
+    },
+    "Grant": {
+      "title": "Grant",
+      "description": "授权：持有 roles 中任一角色的主体可以在 target 上使用列出的 tools、列出的 prompts（\"*\" 表示该目标的全部 prompts）以及（resources 为 true 时）其 resources 与资源模板。租户是 Release 的租户（ADR-0001 D6）。tools、prompts、resources 至少有一项非空。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "tools", "roles"],
+      "properties": {
+        "target": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$"},
+        "tools": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}, "description": "原生工具名"},
+        "prompts": {"type": "array", "items": {"type": "string", "pattern": "^([A-Za-z0-9_.-]{1,128}|\\*)$"}},
+        "resources": {"type": "boolean"},
+        "roles": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,64}$"}}
+      },
+      "anyOf": [
+        {"properties": {"tools": {"minItems": 1}}},
+        {"required": ["prompts"], "properties": {"prompts": {"minItems": 1}}},
+        {"required": ["resources"], "properties": {"resources": {"const": true}}}
+      ]
+    },
+    "Auth": {
+      "title": "Auth",
+      "description": "数据面认证配置：api-key（密钥只存 SHA-256）或 jwt（bearer 令牌，JWKS 校验，RFC 9728 资源元数据）。二者互斥。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["api-key", "jwt"]},
+        "apiKeys": {"type": "array", "items": {"$ref": "#/$defs/APIKey"}},
+        "jwt": {"$ref": "#/$defs/JWT"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "api-key"}}},
+          "then": {"required": ["apiKeys"], "properties": {"apiKeys": {"minItems": 1}}, "not": {"required": ["jwt"]}}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "jwt"}}},
+          "then": {"required": ["jwt"], "not": {"required": ["apiKeys"]}}
+        }
+      ]
+    },
+    "APIKey": {
+      "title": "APIKey",
+      "description": "一把 API Key 到主体的映射。sha256 是密钥的十六进制 SHA-256，在同一 Release 内唯一；密钥本身从不出现在 Release 中。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "subject", "roles", "sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "subject": {"type": "string", "minLength": 1},
+        "roles": {"type": "array", "items": {"type": "string"}},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "JWT": {
+      "title": "JWT",
+      "description": "bearer 令牌校验配置。resource 是网关的规范 MCP 资源 URI（公开的 /mcp 地址），令牌的 aud 必须包含它（RFC 8707）；authorizationServers 发布在 RFC 9728 元数据中。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "resource", "jwksUrl", "authorizationServers", "tenantClaim", "rolesClaim"],
+      "properties": {
+        "issuer": {"type": "string", "format": "uri", "pattern": "^https?://"},
+        "resource": {"type": "string", "format": "uri", "pattern": "^https?://"},
+        "jwksUrl": {"type": "string", "format": "uri", "pattern": "^https?://"},
+        "authorizationServers": {"type": "array", "minItems": 1, "items": {"type": "string", "format": "uri"}},
+        "tenantClaim": {"type": "string", "minLength": 1},
+        "rolesClaim": {"type": "string", "minLength": 1}
+      }
+    },
+    "Envelope": {
+      "title": "Envelope",
+      "description": "存储与分发的形态：Release 文档加其摘要。digest 是文档规范化 JSON（键排序、无多余空白、不转义 HTML、数字按原样）的 sha256:<hex>；网关先核对摘要再打开文档。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "document"],
+      "properties": {
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "document": {"$ref": "#/$defs/Release"}
+      }
+    },
+    "InvocationRecord": {
+      "title": "InvocationRecord",
+      "description": "网关对一次调用的判定记录（ADR-0001 D11）：谁（subject；JWT 的 azp 记为 client，RFC 8693 委派的 act 记为 actor）、以哪个 Release、调了什么（method 与请求的工具名 / prompt 名 / 资源 URI）、判定与结果、时延，以及参数的摘要——从不记录参数本身。网关批量推送到注册服务（POST /internal/v1/gateway/invocations，{\"records\": [...]}）。",
+      "x-idp-telos-owner": "idp.telos.mcp",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "releaseDigest", "subject", "authMethod", "method", "tool", "decision", "outcome", "latencyMs"],
+      "properties": {
+        "at": {"type": "string", "format": "date-time"},
+        "releaseDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "subject": {"type": "string", "minLength": 1},
+        "client": {"type": "string", "minLength": 1, "description": "令牌签发给的 OAuth 客户端（azp）"},
+        "actor": {"type": "string", "minLength": 1, "description": "委派调用者（act.sub）"},
+        "authMethod": {"enum": ["api-key", "jwt"]},
+        "method": {"enum": ["tools/call", "prompts/get", "resources/read", "completion/complete", "tasks/get", "tasks/cancel", "tasks/update"]},
+        "tool": {"type": "string", "minLength": 1, "maxLength": 2048, "description": "对外暴露的工具名或 prompt 名、资源 URI、补全引用的名字或 URI，或 task id，按请求原样"},
+        "target": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$", "description": "解析到的目标；判定为 DENY 时通常没有"},
+        "decision": {"enum": ["ALLOW", "DENY"]},
+        "outcome": {"enum": ["OK", "TOOL_ERROR", "RPC_ERROR", "STREAMED", "NOT_DELIVERED", "UNKNOWN", "DENIED", "INVALID_ARGUMENTS"]},
+        "latencyMs": {"type": "integer", "minimum": 0},
+        "traceId": {"type": "string", "pattern": "^[0-9a-f]{32}$", "description": "W3C trace id，有追踪上下文时写入"},
+        "argsDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "参数规范化 JSON 的摘要，只对 tools/call 且有参数时写入"}
+      }
+    }
+  }
+}

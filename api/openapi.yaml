@@ -3,7 +3,7 @@ info:
   title: idp-mcp registry-service API
   version: 1.0.0
   description: |
-    Control plane of idp-mcp (docs/adr/ADR-0001-go-redesign.md).
+    Control plane of idp-mcp (docs/adr/ADR-0001-mcp-infrastructure.md).
 
     * `/api/v1` - admin API. Bearer JWT with `sub`, `tenant_id`, `roles`, issuer and audience
       `idp-mcp-registry` (production: verified with the IdP's JWKS; development: HS256 secret).

@@ -1,0 +1,468 @@
+{
+  "description": "idp.telos.mcp 1.0.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
+  "generatedBy": "go test ./internal/release -run TestContract -update",
+  "examples": [
+    {
+      "definition": "Release",
+      "value": {
+        "approvedBy": "bob",
+        "auth": {
+          "apiKeys": [
+            {
+              "id": "k-agent-1",
+              "roles": [
+                "operator"
+              ],
+              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+              "subject": "svc-agent"
+            }
+          ],
+          "mode": "api-key"
+        },
+        "createdAt": "2026-11-03T08:00:00Z",
+        "createdBy": "alice",
+        "driftAction": "block",
+        "gatewayId": "gw-edge-1",
+        "grants": [
+          {
+            "prompts": [
+              "*"
+            ],
+            "resources": true,
+            "roles": [
+              "operator"
+            ],
+            "target": "parcel",
+            "tools": [
+              "create_shipment",
+              "get_shipment"
+            ]
+          },
+          {
+            "roles": [
+              "viewer"
+            ],
+            "target": "parcel",
+            "tools": [
+              "get_shipment"
+            ]
+          }
+        ],
+        "releaseId": "rel-2026-11-03-001",
+        "schemaVersion": "idp.mcp.release/v1",
+        "targets": [
+          {
+            "capabilities": [
+              "tools",
+              "prompts",
+              "resources",
+              "completions",
+              "resources.subscribe"
+            ],
+            "endpoint": "https://parcel.internal.example:8443/mcp",
+            "name": "parcel",
+            "network": "private",
+            "prompts": [
+              {
+                "arguments": [
+                  {
+                    "description": "Shipment id",
+                    "name": "shipmentId",
+                    "required": true
+                  }
+                ],
+                "description": "Drafts a label for a shipment.",
+                "name": "shipping-label",
+                "title": "Shipping label"
+              }
+            ],
+            "resourceTemplates": [
+              {
+                "mimeType": "application/json",
+                "name": "shipment",
+                "uriTemplate": "parcel://shipments/{id}"
+              }
+            ],
+            "resources": [
+              {
+                "mimeType": "application/json",
+                "name": "rates",
+                "size": 2048,
+                "title": "Current rates",
+                "uri": "parcel://rates/current"
+              }
+            ],
+            "serverId": "srv-parcel",
+            "snapshotDigest": "sha256:3345b33b6703130f2a5561072612f701fec627a8b87a6d330fc2e8db6ef346cf",
+            "tools": [
+              {
+                "annotations": {
+                  "destructiveHint": false,
+                  "idempotentHint": true,
+                  "openWorldHint": true,
+                  "readOnlyHint": false
+                },
+                "description": "Creates a shipment and returns its id.",
+                "inputSchema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "recipient": {
+                      "type": "string"
+                    },
+                    "weightKg": {
+                      "minimum": 0.01,
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "recipient",
+                    "weightKg"
+                  ],
+                  "type": "object"
+                },
+                "name": "create_shipment",
+                "outputSchema": {
+                  "properties": {
+                    "shipmentId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "shipmentId"
+                  ],
+                  "type": "object"
+                },
+                "title": "Create shipment"
+              },
+              {
+                "annotations": {
+                  "readOnlyHint": true
+                },
+                "description": "Reads one shipment.",
+                "icons": [
+                  {
+                    "mimeType": "image/png",
+                    "src": "https://parcel.internal.example/icon.png"
+                  }
+                ],
+                "inputSchema": {
+                  "properties": {
+                    "shipmentId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "shipmentId"
+                  ],
+                  "type": "object"
+                },
+                "name": "get_shipment"
+              }
+            ]
+          }
+        ],
+        "tenantId": "acme",
+        "toolNaming": "prefixed"
+      }
+    },
+    {
+      "definition": "Release",
+      "value": {
+        "auth": {
+          "jwt": {
+            "authorizationServers": [
+              "https://idp.example/realms/idp"
+            ],
+            "issuer": "https://idp.example/realms/idp",
+            "jwksUrl": "https://idp.example/realms/idp/protocol/openid-connect/certs",
+            "resource": "https://mcp.example/mcp",
+            "rolesClaim": "roles",
+            "tenantClaim": "tenant_id"
+          },
+          "mode": "jwt"
+        },
+        "createdAt": "2026-11-03T09:30:00Z",
+        "createdBy": "alice",
+        "driftAction": "report",
+        "gatewayId": "gw-dev-1",
+        "grants": [
+          {
+            "roles": [
+              "agent"
+            ],
+            "target": "tasks",
+            "tools": [
+              "long_running_job"
+            ]
+          }
+        ],
+        "releaseId": "rel-2026-11-03-002",
+        "schemaVersion": "idp.mcp.release/v1",
+        "targets": [
+          {
+            "capabilities": [
+              "tools",
+              "tasks"
+            ],
+            "endpoint": "http://127.0.0.1:3111/mcp",
+            "name": "tasks",
+            "network": "loopback",
+            "prompts": [],
+            "serverId": "srv-tasks",
+            "snapshotDigest": "sha256:f7d2360a84e0a3a9b74ce50fd1dcd08ea1448d60498880f05713cd4480c6ec76",
+            "tools": [
+              {
+                "description": "Starts a job; may answer with a task.",
+                "execution": {
+                  "taskSupport": "optional"
+                },
+                "inputSchema": {
+                  "properties": {
+                    "input": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "name": "long_running_job"
+              }
+            ]
+          }
+        ],
+        "tenantId": "acme",
+        "toolNaming": "native"
+      }
+    },
+    {
+      "definition": "Envelope",
+      "value": {
+        "digest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "document": {
+          "approvedBy": "bob",
+          "auth": {
+            "apiKeys": [
+              {
+                "id": "k-agent-1",
+                "roles": [
+                  "operator"
+                ],
+                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "subject": "svc-agent"
+              }
+            ],
+            "mode": "api-key"
+          },
+          "createdAt": "2026-11-03T08:00:00Z",
+          "createdBy": "alice",
+          "driftAction": "block",
+          "gatewayId": "gw-edge-1",
+          "grants": [
+            {
+              "prompts": [
+                "*"
+              ],
+              "resources": true,
+              "roles": [
+                "operator"
+              ],
+              "target": "parcel",
+              "tools": [
+                "create_shipment",
+                "get_shipment"
+              ]
+            },
+            {
+              "roles": [
+                "viewer"
+              ],
+              "target": "parcel",
+              "tools": [
+                "get_shipment"
+              ]
+            }
+          ],
+          "releaseId": "rel-2026-11-03-001",
+          "schemaVersion": "idp.mcp.release/v1",
+          "targets": [
+            {
+              "capabilities": [
+                "tools",
+                "prompts",
+                "resources",
+                "completions",
+                "resources.subscribe"
+              ],
+              "endpoint": "https://parcel.internal.example:8443/mcp",
+              "name": "parcel",
+              "network": "private",
+              "prompts": [
+                {
+                  "arguments": [
+                    {
+                      "description": "Shipment id",
+                      "name": "shipmentId",
+                      "required": true
+                    }
+                  ],
+                  "description": "Drafts a label for a shipment.",
+                  "name": "shipping-label",
+                  "title": "Shipping label"
+                }
+              ],
+              "resourceTemplates": [
+                {
+                  "mimeType": "application/json",
+                  "name": "shipment",
+                  "uriTemplate": "parcel://shipments/{id}"
+                }
+              ],
+              "resources": [
+                {
+                  "mimeType": "application/json",
+                  "name": "rates",
+                  "size": 2048,
+                  "title": "Current rates",
+                  "uri": "parcel://rates/current"
+                }
+              ],
+              "serverId": "srv-parcel",
+              "snapshotDigest": "sha256:3345b33b6703130f2a5561072612f701fec627a8b87a6d330fc2e8db6ef346cf",
+              "tools": [
+                {
+                  "annotations": {
+                    "destructiveHint": false,
+                    "idempotentHint": true,
+                    "openWorldHint": true,
+                    "readOnlyHint": false
+                  },
+                  "description": "Creates a shipment and returns its id.",
+                  "inputSchema": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "recipient": {
+                        "type": "string"
+                      },
+                      "weightKg": {
+                        "minimum": 0.01,
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "recipient",
+                      "weightKg"
+                    ],
+                    "type": "object"
+                  },
+                  "name": "create_shipment",
+                  "outputSchema": {
+                    "properties": {
+                      "shipmentId": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "shipmentId"
+                    ],
+                    "type": "object"
+                  },
+                  "title": "Create shipment"
+                },
+                {
+                  "annotations": {
+                    "readOnlyHint": true
+                  },
+                  "description": "Reads one shipment.",
+                  "icons": [
+                    {
+                      "mimeType": "image/png",
+                      "src": "https://parcel.internal.example/icon.png"
+                    }
+                  ],
+                  "inputSchema": {
+                    "properties": {
+                      "shipmentId": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "shipmentId"
+                    ],
+                    "type": "object"
+                  },
+                  "name": "get_shipment"
+                }
+              ]
+            }
+          ],
+          "tenantId": "acme",
+          "toolNaming": "prefixed"
+        }
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "argsDigest": "sha256:45a0b971844a2bceaec673c2a0c84defadd0aa949b33b4196e624e29f979d647",
+        "at": "2026-11-03T10:15:00Z",
+        "authMethod": "api-key",
+        "decision": "ALLOW",
+        "latencyMs": 42,
+        "method": "tools/call",
+        "outcome": "OK",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "svc-agent",
+        "target": "parcel",
+        "tool": "parcel__create_shipment",
+        "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "actor": "svc-agent",
+        "at": "2026-11-03T10:15:01Z",
+        "authMethod": "jwt",
+        "client": "agent-exchange",
+        "decision": "DENY",
+        "latencyMs": 1,
+        "method": "prompts/get",
+        "outcome": "DENIED",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "alice",
+        "tool": "parcel__internal-only"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:02Z",
+        "authMethod": "api-key",
+        "decision": "ALLOW",
+        "latencyMs": 3,
+        "method": "resources/read",
+        "outcome": "NOT_DELIVERED",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "svc-agent",
+        "target": "parcel",
+        "tool": "parcel://rates/current",
+        "traceId": "4bf92f3577b34da6a3ce929d0e0e4737"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:03Z",
+        "authMethod": "jwt",
+        "client": "agent-exchange",
+        "decision": "ALLOW",
+        "latencyMs": 7,
+        "method": "tasks/get",
+        "outcome": "OK",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "alice",
+        "target": "tasks",
+        "tool": "task_01JD7Q3Z8M8T0G3C6N4V9S2A1B"
+      }
+    }
+  ]
+}

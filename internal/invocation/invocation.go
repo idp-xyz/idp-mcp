@@ -26,7 +26,8 @@ const (
 	OutcomeInvalidArgs  = "INVALID_ARGUMENTS" // refused before delivery: arguments violate the pinned inputSchema
 )
 
-// Record is one decision.
+// Record is one decision. Its JSON form is the published InvocationRecord contract (idp.telos.mcp
+// 1.0.0, api/contracts/schema.json); internal/release's contract test keeps the two in step.
 type Record struct {
 	At            time.Time `json:"at"`
 	ReleaseDigest string    `json:"releaseDigest"`
@@ -34,8 +35,8 @@ type Record struct {
 	Client        string    `json:"client,omitempty"` // OAuth client the token was issued to (azp)
 	Actor         string    `json:"actor,omitempty"`  // delegated caller (RFC 8693 act), if any
 	AuthMethod    string    `json:"authMethod"`
-	Method        string    `json:"method"` // tools/call, prompts/get, resources/read, completion/complete
-	Tool          string    `json:"tool"`   // exposed tool or prompt name, or resource URI, as requested
+	Method        string    `json:"method"` // tools/call, prompts/get, resources/read, completion/complete, tasks/get|cancel|update
+	Tool          string    `json:"tool"`   // exposed tool or prompt name, resource URI, completion ref or task id, as requested
 	Target        string    `json:"target,omitempty"`
 	Decision      string    `json:"decision"`
 	Outcome       string    `json:"outcome"`

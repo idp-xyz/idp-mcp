@@ -1,21 +1,21 @@
-# ADR-0001　MCP Infrastructure 的 Go 重新设计
+# ADR-0001　MCP Infrastructure 的设计
 
 | 项 | 内容 |
 |---|---|
 | 状态 | 草案（2026-11-02），待决策人确认 |
-| 范围 | `idp-telos-go/idp-mcp`：MCP 网关（数据面）与注册服务（控制面） |
-| 依据 | 决策人 2026-11-02 的选择：先做 MCP；重新设计，不受 Python 版约束；工程结构按《IDP TELOS Repository & Engineering Architecture v1.0》；完全重构 |
-| 参考 | Python 版 `idp-telos/idp-mcp`（只作为经验来源，不是兼容目标）；MCP 规范 2026-07-28 |
+| 范围 | `idp-mcp`：MCP 网关（数据面）与注册服务（控制面） |
+| 依据 | 决策人 2026-11-02 的选择：先做 MCP；自研数据面；工程结构按《IDP TELOS Repository & Engineering Architecture v1.0》 |
+| 参考 | MCP 规范 2026-07-28；《IDP TELOS System Architecture v1.0》 |
 
 ## 1. 背景
 
-Python 版由 FastAPI 控制面、Python 写的 Modern Boundary 和 agentgateway 1.6.0 组成。实测留下的教训：
+MCP 基础设施把模型可调用的工具目录、认证授权和调用审计集中到网关上。设计前先排除"外置网关产品 + 自写边界服务"这类常见方案的已知弱点：
 
-- 两跳数据面（Boundary → agentgateway）。agentgateway 不能只绑定回环地址，为此先后做了私有 netns、Unix socket 中继和 pod-guard 三层补偿。
-- 授权规则要先编译成 agentgateway 的 CEL 才能执行；拒绝的语义只能事后从网关的返回形态去推断（"Unknown tool"）。
+- 两跳数据面：网关产品往往不能只绑定回环地址，要靠私有 netns、socket 中继之类的网络隔离补偿。
+- 授权规则要先编译成网关产品的表达式语言才能执行；拒绝的语义只能事后从返回形态推断。
 - 网关直接透传上游的 `tools/list`：审批之后上游如果改了工具描述（rug pull），网关看不到。
-- SSRF 检查只在注册时做，网关连接上游时会重新解析 DNS（文档里承认的缺口）。
-- 多租户只靠应用层过滤，没有 RLS。
+- SSRF 检查只在注册时做，网关连接上游时会重新解析 DNS。
+- 多租户只靠应用层过滤，没有数据库层的隔离。
 
 ## 2. 决策
 
@@ -24,15 +24,15 @@ Python 版由 FastAPI 控制面、Python 写的 Modern Boundary 和 agentgateway
 | D1 | **自研 Go 数据面**：准入、认证、授权、联邦、调用审计都在 `mcp-gateway` 一个进程内完成，单跳 | 去掉 agentgateway 带来的绑定、配置渲染和拒绝语义问题；代价是协议符合性（官方 37 项）要重新挣，放在第二阶段的门禁里 |
 | D2 | **控制面与数据面通过不可变 Release 交互**：注册服务把已批准的内容编译成 Release（规范化 JSON + SHA-256）；网关拉取期望状态，或者读本地文件（离线、本地部署） | 网关不连数据库；Release 可以审计、回滚、离线分发 |
 | D3 | **工具目录钉在 Release 里**：网关的 `tools/list` 直接用 Release 中审批过的工具定义，不透传上游。网关定期比对上游的实时目录摘要，出现漂移就默认封锁该目标 | 防止审批后上游篡改工具描述或参数结构 |
-| D4 | **网关自证运行态**：网关心跳上报正在运行的 Release 摘要和各目标的漂移状态。注册服务据此判定 GOOD/FAILED，失败时自动把期望状态退回上一个 GOOD | 替代 Python 版通过 admin.sock 读 `/config_dump`；网关不暴露管理端口 |
+| D4 | **网关自证运行态**：网关心跳上报正在运行的 Release 摘要和各目标的漂移状态。注册服务据此判定 GOOD/FAILED，失败时自动把期望状态退回上一个 GOOD | 网关不暴露管理端口，运行态只能由它自己上报 |
 | D5 | **授权原生执行**：Release 中的授权（租户 + 角色 + 工具）由网关直接判定；`tools/list` 按调用者过滤；未授权的调用与不存在的工具返回完全相同的错误 | 不依赖网关产品的表达式语言；防止枚举工具目录 |
 | D6 | **一个网关实例只服务一个租户**：网关记录属于某个租户，Release 属于某个网关 | 隔离简单清楚；SaaS 部署按租户起多个实例 |
 | D7 | **对外工具名为 `<target>__<tool>`**：target 只允许 `[a-z0-9-]`，所以第一个 `__` 一定是分隔符 | 名字可以无歧义地拆回 (target, tool)，并且符合常见客户端对函数名字符集的限制 |
 | D8 | **连接上游时再检查一次地址**：在 `net.Dialer.Control` 中检查实际连接的 IP，与注册时的 SSRF 规则相同（公网 https；dev 模式允许回环；精确主机名可以解析到私有地址；metadata、link-local、CGNAT 等一律拒绝） | 补上 DNS 重绑定的缺口 |
 | D9 | **多租户隔离由 PostgreSQL RLS（FORCE）执行**：每个事务设置 `app.tenant_id`，所有租户表上都有策略；只有网关凭据表在租户确定之前查询，因此不加 RLS。服务以非超级用户、非 BYPASSRLS 的角色运行，启动时检查，不满足就拒绝启动；审计表和调用记录表对服务角色只授予 INSERT/SELECT | 隔离不依赖每条 SQL 都记得写租户条件。**注意：目前 RLS 是唯一的一层**，应用层 SQL 没有再写 `WHERE tenant_id`（集成测试中关闭 RLS 后，跨租户读取立即出现）；是否补应用层条件作为第二层，待定 |
-| D10 | **四眼原则**：服务器审批、授权审批、Release 审批，审批人都不能是创建人 | 沿用 Python 版行之有效的规则 |
+| D10 | **四眼原则**：服务器审批、授权审批、Release 审批，审批人都不能是创建人 | 创建与审批分离是最低限度的制衡 |
 | D11 | **调用审计不记录参数原文**：每次 `tools/call` 记录主体、目标、工具、判定、结果、耗时、trace_id，以及参数的规范化摘要；网关批量推送给注册服务 | 可以关联，又不留存业务数据 |
-| D12 | **只支持 MCP 2026-07-28 modern 模式**：只接受 `POST /mcp`；`MCP-Protocol-Version` 必须是 2026-07-28；`_meta` 信封必须完整；拒绝旧握手 | 与 Python 版 G1 的结论一致 |
+| D12 | **只支持 MCP 2026-07-28 modern 模式**：只接受 `POST /mcp`；`MCP-Protocol-Version` 必须是 2026-07-28；`_meta` 信封必须完整；拒绝旧握手 | 旧握手与旧传输只增加攻击面，没有业务需要 |
 | D13 | **依赖尽量少**：pgx、golang-jwt，其余用标准库（JWKS 解析、迁移、规范化 JSON 都自己实现） | 供应链面小，离线构建容易 |
 
 ## 3. 第一阶段范围（M1）
@@ -53,7 +53,7 @@ Python 版由 FastAPI 控制面、Python 写的 Modern Boundary 和 agentgateway
 ## 5. 后果
 
 - 正面：单跳数据面；工具目录防篡改；授权可读、可测；连接时检查地址；RLS 兜底；Release 可以离线分发。
-- 负面：协议符合性要从零做起；自研网关要自己负责性能和协议演进；与 Python 版的 API 和数据不兼容，没有迁移路径（按决策不需要）。
+- 负面：协议符合性要从零做起；自研网关要自己负责性能和协议演进。
 
 ## 6. M1 实施结果（2026-11-02，WSL 实测）
 
@@ -90,7 +90,7 @@ Python 版由 FastAPI 控制面、Python 写的 Modern Boundary 和 agentgateway
 | D19 | **调用审计扩展到 `prompts/get`、`resources/read`、`completion/complete`**，新增 `method` 字段 | 这些请求同样把数据交给模型 |
 | D20 | **`ping` 不在本地应答**：2026-07-28 已移除 ping（SEP-2575），返回 404 与 -32601 | 官方套件实测发现：M1 在本地应答 ping，违反规范 |
 
-**符合性测试的方法**：官方运行器（`@modelcontextprotocol/conformance` 0.2.0-alpha.12，冻结的 2026-07-28 需求，37 个服务器场景）→ 测试夹具代理 → 网关（进程内）→ Python SDK 的 Everything Server。运行器不能携带凭据，所以夹具代理代为加上数据面 API Key，其余逐字节转发：Host 和 Origin 不改，流式响应即时转发。网关走的是正常的认证与授权路径，**产品中没有免认证模式**。Release 为单一目标、native 命名，所有工具、prompts 和 resources 都授权给该 Key 的角色。计分规则与 Python 版相同：出现 FAILURE、未知状态或没有任何 SUCCESS 都不计为通过。
+**符合性测试的方法**：官方运行器（`@modelcontextprotocol/conformance` 0.2.0-alpha.12，冻结的 2026-07-28 需求，37 个服务器场景）→ 测试夹具代理 → 网关（进程内）→ Python SDK 的 Everything Server。运行器不能携带凭据，所以夹具代理代为加上数据面 API Key，其余逐字节转发：Host 和 Origin 不改，流式响应即时转发。网关走的是正常的认证与授权路径，**产品中没有免认证模式**。Release 为单一目标、native 命名，所有工具、prompts 和 resources 都授权给该 Key 的角色。计分规则：出现 FAILURE、未知状态或没有任何 SUCCESS 都不计为通过。
 
 **结果**
 - 官方符合性：**37/37**（`make conformance`，运行器退出码 0）。第一次运行是 36/37，唯一的失败就是上面的 D20。
@@ -199,3 +199,13 @@ Python 版由 FastAPI 控制面、Python 写的 Modern Boundary 和 agentgateway
 - tasks 的真实上游是自写的参考实现，不是第三方实现；`notifications/tasks` 的订阅中继仍只有单元测试（官方场景自己标注待重写）。
 - 指标没有带上租户维度（避免高基数），按租户的用量要从调用记录聚合。
 - 多副本合并只处理"全部存活副本一致"，没有做分批发布（canary）语义。
+
+## 11. 契约发布：idp.telos.mcp 1.0.0（2026-11-03）
+
+决策人 2026-11-03 确认：各模块的机器契约统一登记在 `idp-contracts`（命名空间 `idp.telos.<模块>`，各自独立版本），登记的前提是实现侧的一致性测试。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| D39 | **本仓库是 `idp.telos.mcp` 1.0.0 的生产者**：权威副本在 `api/contracts/`（`schema.json` 手写，`examples.json` 由 Go 值生成），发布三个文档——Release（`idp.mcp.release/v1`）、Envelope、InvocationRecord——与九个组成对象；`internal/release/contract_test.go` 证明 schema 与实现一致：密封出的文档都满足 schema 且不含 `null`（`Seal` 把 nil 集合规范为空），示例都能被 `Open` 接受、记录都能无损往返 `invocation.Record`，封闭对象的属性集与 `required` 等于 Go 结构体的 JSON 字段，实现拒绝的变体 schema 也拒绝。`idp-contracts/idp.telos.mcp/1.0.0` 只是逐字节相同的发布副本，由那边的 `tools/validate.py` 核对 | 契约必须由生产者拥有并由测试钉住，否则登记只是一份会过时的文档；JSON Schema 只能表达形状与本地规则，摘要与交叉引用仍由 `Validate` 判定，所以两边都要测 |
+
+网关与注册服务之间的内部接口（期望状态、心跳、调用批量）和管理 API 仍只由 `api/openapi.yaml` 描述，不登记为契约。
