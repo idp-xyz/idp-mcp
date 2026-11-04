@@ -75,3 +75,7 @@ go test ./internal/release -run TestContract -update   # 改了 Release / Invoca
 ## 尚未完成
 
 见 ADR 第 6–10 节。主要是：Kubernetes 清单未在集群上实测；委派是 Keycloak 的预览特性，`may_act` 需逐个代理配置；tasks 的真实上游是自写的参考实现；多副本合并没有分批发布语义；指标不含租户维度。
+
+## 许可证
+
+本仓库采用 [PolyForm Noncommercial License 1.0.0](LICENSE)：允许非商业用途，禁止任何商业使用。
