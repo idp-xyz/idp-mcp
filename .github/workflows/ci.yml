@@ -1,0 +1,32 @@
+name: CI
+
+# The merge gate of idp-mcp: formatting and vet, unit and contract tests (race detector on), the
+# integration suite against a throwaway PostgreSQL (the Makefile starts it in Docker), and the
+# offline image build. The compose end-to-end (deploy/e2e.sh) is not run here yet: its upstream
+# fixture image is built from local SDK checkouts (deploy/fixtures/build.sh).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: vet, unit, contract, integration, image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Formatting, vet, unit and contract tests
+        run: make test
+      - name: Integration tests (PostgreSQL in Docker)
+        run: make test-integration
+      - name: Image build (static binary, docker build --network none)
+        run: bash deploy/build.sh idp-mcp:ci
