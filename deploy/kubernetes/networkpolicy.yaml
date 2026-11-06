@@ -70,6 +70,7 @@ spec:
       ports:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 8443}
+        - {protocol: TCP, port: 8570}   # idp-sandbox (a private-network upstream)
     - to:
         - ipBlock:
             cidr: 203.0.113.10/32       # the IdP (JWKS); replace with its address or a namespaceSelector
@@ -118,6 +119,7 @@ spec:
       ports:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 8443}
+        - {protocol: TCP, port: 8570}   # idp-sandbox (a private-network upstream)
     - to:
         - ipBlock:
             cidr: 203.0.113.10/32       # the IdP (JWKS)
