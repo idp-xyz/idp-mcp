@@ -1,5 +1,5 @@
 {
-  "description": "idp.telos.mcp 1.0.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
+  "description": "idp.telos.mcp 1.1.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
   "generatedBy": "go test ./internal/release -run TestContract -update",
   "examples": [
     {
@@ -205,6 +205,7 @@
               "tasks"
             ],
             "endpoint": "http://127.0.0.1:3111/mcp",
+            "identity": "forward",
             "name": "tasks",
             "network": "loopback",
             "prompts": [],

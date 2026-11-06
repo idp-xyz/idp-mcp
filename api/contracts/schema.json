@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:idp:telos:mcp:1.0.0",
-  "title": "idp.telos.mcp 1.0.0",
+  "$id": "urn:idp:telos:mcp:1.1.0",
+  "title": "idp.telos.mcp 1.1.0",
   "description": "idp-mcp（MCP 基础设施）对外发布的契约：Release（网关唯一运行的不可变配置，ADR-0001 D2）、Envelope（Release 加内容摘要，注册服务与网关之间、以及导出时的形态）和 InvocationRecord（网关对每次调用的判定记录，ADR-0001 D11）。生产者是 idp-mcp，权威副本在 idp-mcp/api/contracts/，由 go test ./internal/release -run TestContract 保证与实现一致；idp-contracts 中的副本只能与之逐字节相同。JSON Schema 只描述形状与可本地判定的规则；摘要是否匹配、名字是否跨目标唯一、授权是否引用了存在的工具等由 release.Document.Validate 判定。",
   "oneOf": [
     {"$ref": "#/$defs/Release"},
@@ -33,7 +33,7 @@
     },
     "Target": {
       "title": "Target",
-      "description": "一个上游 MCP 服务器及其钉住的、经审批的目录：工具、prompts、resources 与资源模板（ADR-0001 D34）。snapshotDigest 是 {tools, prompts, resources, resourceTemplates} 规范化 JSON 的 SHA-256，网关据此检测漂移。network 是注册服务为该端点批准的地址类别，网关只允许拨到该类别。",
+      "description": "一个上游 MCP 服务器及其钉住的、经审批的目录：工具、prompts、resources 与资源模板（ADR-0001 D34）。snapshotDigest 是 {tools, prompts, resources, resourceTemplates} 规范化 JSON 的 SHA-256，网关据此检测漂移。network 是注册服务为该端点批准的地址类别，网关只允许拨到该类别。identity 为 forward 时，网关把经过认证的调用者（io.idp.telos/caller：subject、tenant、roles，以及 client、actor）放进发给该目标的每个请求的 _meta，并总是删除客户端自带的同名键；省略表示不转发（ADR-0001 D31）。",
       "x-idp-telos-owner": "idp.telos.mcp",
       "type": "object",
       "additionalProperties": false,
@@ -43,6 +43,7 @@
         "serverId": {"type": "string", "minLength": 1},
         "endpoint": {"type": "string", "format": "uri", "pattern": "^https?://[^/?#@\\s]+(/[^?#\\s]*)?$", "description": "http(s) URL，不含凭据、查询与片段"},
         "network": {"enum": ["public", "private", "loopback"]},
+        "identity": {"const": "forward", "description": "省略 = 不向该目标转发调用者；forward = 转发经过认证的调用者。进入 Release，因此由审批人批准哪些服务器能知道是谁在调用"},
         "snapshotDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "tools": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Tool"}, "description": "原生名字"},
         "prompts": {"type": "array", "items": {"$ref": "#/$defs/Prompt"}, "description": "原生名字；没有 prompts 能力时为空"},

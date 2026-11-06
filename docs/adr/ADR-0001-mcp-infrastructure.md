@@ -209,3 +209,18 @@ MCP 基础设施把模型可调用的工具目录、认证授权和调用审计�
 | D39 | **本仓库是 `idp.telos.mcp` 1.0.0 的生产者**：权威副本在 `api/contracts/`（`schema.json` 手写，`examples.json` 由 Go 值生成），发布三个文档——Release（`idp.mcp.release/v1`）、Envelope、InvocationRecord——与九个组成对象；`internal/release/contract_test.go` 证明 schema 与实现一致：密封出的文档都满足 schema 且不含 `null`（`Seal` 把 nil 集合规范为空），示例都能被 `Open` 接受、记录都能无损往返 `invocation.Record`，封闭对象的属性集与 `required` 等于 Go 结构体的 JSON 字段，实现拒绝的变体 schema 也拒绝。`idp-contracts/idp.telos.mcp/1.0.0` 只是逐字节相同的发布副本，由那边的 `tools/validate.py` 核对 | 契约必须由生产者拥有并由测试钉住，否则登记只是一份会过时的文档；JSON Schema 只能表达形状与本地规则，摘要与交叉引用仍由 `Validate` 判定，所以两边都要测 |
 
 网关与注册服务之间的内部接口（期望状态、心跳、调用批量）和管理 API 仍只由 `api/openapi.yaml` 描述，不登记为契约。
+
+## 12. M6：向上游转发调用者身份（2026-11-06，契约 1.1.0）
+
+起因：idp-sandbox（Agent 执行沙箱）作为网关的上游，需要知道是谁在调用，才能把工作区绑到调用者、按调用者限额。此前网关不向上游转发任何凭据或身份（`TestToolsCallIsRoutedUnderTheNativeName` 保证不转发客户端凭据），所以上游只能把工作区 id 当承载令牌。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| D40 | **目标有 `identity` 属性：`none`（默认）或 `forward`**。注册服务器时设定（`POST /api/v1/servers` 的 `identity`，之后不可改），编译进 Release 的 `targets[].identity`（`none` 时省略，所以已有 Release 的摘要不变）。`forward` 的目标，网关在发给它的每个请求的 `_meta["io.idp.telos/caller"]` 里放经过认证的调用者：`subject`、`tenant`、`roles`，以及 `client`（azp）与 `actor`（RFC 8693 的 act）。审计字段沿用，授权仍只看 subject、tenant、roles | 哪些服务器能知道"是谁在调用"是一个应当由审批人看见并批准的事：它在 Release 里，改它就改摘要，要经他人审批才能部署 |
+| D41 | **`io.idp.telos/caller` 是网关的键：对每一个转发的请求，先删除客户端自带的同名键，再（仅对 `forward` 的目标）写入网关自己认证出的值** | 上游若信任这个键，就必须能信任它来自网关的认证，而不是调用者自己填的。测试 `TestNoIdentityIsForwardedByDefaultAndForgeryIsStripped`、`TestForwardIdentityPassesTheVerifiedCaller`（伪造的 admin 被覆盖） |
+| D42 | **范围**：`tools/call`、`prompts/get`、`resources/read`、`completion/complete`、tasks 的请求都经同一个转发函数，所以都带。`subscriptions/listen` 的中继是网关自己对上游开的流、不属于某个调用者，所以不带身份（它本来就不转发客户端的 `_meta`） | 一个流服务多个订阅者时没有"那个调用者" |
+| D43 | **这一跳本身仍然没有认证**：上游靠"只有网关能到达它的私网"相信网关（与此前一样）；转发身份没有改变这一点，也没有给身份签名 | 签名需要网关与上游之间的密钥分发，是另一个决策；这里只解决"上游能知道是谁"，不解决"上游能证明是网关告诉它的" |
+
+**契约**：`idp.telos.mcp` 1.0.0 → **1.1.0**，只有向后兼容的新增（Target 的可选 `identity`，枚举只有 `forward`）。OpenAPI 1.1.0 的 `identity` 同理。迁移 `0007_server_identity.sql`。
+
+**验证**：release 的单元（省略与摘要、未知取值被拒、`IdentityOf`）；网关的单元（转发、伪造被覆盖、默认不转发、不改动输入）；契约一致性测试；idp-sandbox 的端到端经真实的注册服务与网关验证了整条链（以该服务器 `identity: forward` 注册，沙箱按调用者隔离工作区）。

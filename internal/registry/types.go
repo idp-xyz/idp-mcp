@@ -96,6 +96,7 @@ type Server struct {
 	DisplayName        string    `json:"displayName"`
 	Endpoint           string    `json:"endpoint"`
 	Network            string    `json:"network"`
+	Identity           string    `json:"identity"` // "none" or "forward": the verified caller is passed to the server
 	Lifecycle          string    `json:"lifecycle"`
 	SnapshotID         *string   `json:"snapshotId"`
 	ApprovedSnapshotID *string   `json:"approvedSnapshotId"`

@@ -187,3 +187,26 @@ func TestPinnedResourcesRoundTripWithEveryField(t *testing.T) {
 		t.Fatalf("%s lost icons", tb)
 	}
 }
+
+func TestIdentityModeIsValidatedAndOmittedWhenNone(t *testing.T) {
+	d := sample()
+	base, err := Seal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(base.Document), "identity") {
+		t.Fatal("an unset identity must not appear in the canonical release (existing digests must not change)")
+	}
+	d.Targets[0].Identity = IdentityForward
+	fwd, err := Seal(d)
+	if err != nil || fwd.Digest == base.Digest {
+		t.Fatalf("forwarding must change the digest the reviewer approves: %v", err)
+	}
+	d.Targets[0].Identity = "everyone"
+	if _, err := Seal(d); err == nil {
+		t.Fatal("an unknown identity mode was accepted")
+	}
+	if IdentityOf("none") != "" || IdentityOf(IdentityForward) != IdentityForward || IdentityOf("") != "" {
+		t.Fatal("IdentityOf")
+	}
+}

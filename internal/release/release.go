@@ -105,7 +105,11 @@ type Target struct {
 	// Network is the address class the registry approved for the endpoint: "public", "private"
 	// (an exact host on the private allowlist) or "loopback" (development only). The gateway allows
 	// dials to that class only (ADR-0001 D8).
-	Network        string          `json:"network"`
+	Network string `json:"network"`
+	// Identity "forward": the gateway puts the verified caller into _meta of every request it sends to this
+	// target (ADR-0001 D31). Part of the release, so a reviewer approves which servers learn who is asking.
+	// Empty means nothing is forwarded; the field is omitted then, so existing digests do not change.
+	Identity       string          `json:"identity,omitempty"`
 	SnapshotDigest string          `json:"snapshotDigest"` // CatalogDigest(Tools, Prompts): the full approved catalog
 	Tools          []server.Tool   `json:"tools"`          // native names
 	Prompts        []server.Prompt `json:"prompts"`        // native names; pinned like tools (M3)
@@ -117,6 +121,20 @@ type Target struct {
 	// ones (tools, prompts, resources, completions). Prompts and resources are passed through live,
 	// not pinned; grants decide who may use them.
 	Capabilities []string `json:"capabilities"`
+}
+
+// Identity modes of a target (the registry stores "none" and "forward"; a release omits "none").
+const (
+	IdentityNone    = "none"
+	IdentityForward = "forward"
+)
+
+// IdentityOf maps a stored identity mode to its release form: "none" is omitted.
+func IdentityOf(stored string) string {
+	if stored == IdentityForward {
+		return IdentityForward
+	}
+	return ""
 }
 
 // Network classes of a target.
@@ -338,6 +356,9 @@ func (d *Document) Validate() error {
 		}
 		if t.Network != NetworkPublic && t.Network != NetworkPrivate && t.Network != NetworkLoopback {
 			bad("target %s: network must be public, private or loopback", t.Name)
+		}
+		if t.Identity != "" && t.Identity != IdentityForward {
+			bad("target %s: identity must be omitted or forward", t.Name)
 		}
 		if dg, err := t.Catalog().Digest(); err != nil || dg != t.SnapshotDigest {
 			bad("target %s: catalog does not match snapshotDigest", t.Name)

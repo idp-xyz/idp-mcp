@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: idp-mcp registry-service API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Control plane of idp-mcp (docs/adr/ADR-0001-mcp-infrastructure.md).
 
@@ -54,6 +54,7 @@ paths:
                 displayName: {type: string, minLength: 1, maxLength: 120}
                 targetName: {type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'}
                 endpoint: {type: string, format: uri, description: 'http(s) URL ending in /mcp'}
+                identity: {type: string, enum: [none, forward], default: none, description: 'forward: the gateway passes the verified caller (io.idp.telos/caller in _meta) to this server with every call; fixed at registration and reviewed with the release (ADR-0001 D31)'}
       responses:
         '201': {description: registered (DRAFT), content: {application/json: {schema: {$ref: '#/components/schemas/Server'}}}}
         '400': {$ref: '#/components/responses/Error'}
@@ -349,6 +350,7 @@ components:
         displayName: {type: string}
         endpoint: {type: string}
         network: {type: string, enum: [public, private, loopback]}
+        identity: {type: string, enum: [none, forward]}
         lifecycle: {type: string, enum: [DRAFT, REVIEWED, APPROVED, RETIRED]}
         snapshotId: {type: [string, 'null']}
         approvedSnapshotId: {type: [string, 'null']}

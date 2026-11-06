@@ -44,7 +44,7 @@ func (s *Service) staleAfter() time.Duration {
 
 var roleRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
 
-const serverColumns = `s.id::text, s.target_name, s.display_name, s.endpoint, s.network, s.lifecycle,
+const serverColumns = `s.id::text, s.target_name, s.display_name, s.endpoint, s.network, s.identity, s.lifecycle,
   s.snapshot_id::text, s.approved_snapshot_id::text, ls.digest, aps.digest,
   coalesce((SELECT array_agg(t->>'name' ORDER BY t->>'name') FROM jsonb_array_elements(ls.tools::jsonb) t), '{}'),
   coalesce((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(coalesce(ls.discovery->'capabilities', '{}'::jsonb)) k
@@ -54,7 +54,7 @@ FROM servers s LEFT JOIN snapshots ls ON ls.id = s.snapshot_id LEFT JOIN snapsho
 
 func scanServer(row pgx.Row) (*Server, error) {
 	var s Server
-	err := row.Scan(&s.ID, &s.TargetName, &s.DisplayName, &s.Endpoint, &s.Network, &s.Lifecycle, &s.SnapshotID,
+	err := row.Scan(&s.ID, &s.TargetName, &s.DisplayName, &s.Endpoint, &s.Network, &s.Identity, &s.Lifecycle, &s.SnapshotID,
 		&s.ApprovedSnapshotID, &s.SnapshotDigest, &s.ApprovedDigest, &s.ToolNames, &s.Capabilities, &s.CreatedBy, &s.ApprovedBy, &s.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
@@ -82,6 +82,10 @@ type RegisterInput struct {
 	DisplayName string `json:"displayName"`
 	TargetName  string `json:"targetName"`
 	Endpoint    string `json:"endpoint"`
+	// Identity "forward" has the gateway pass the verified caller to this server with every call (the server
+	// then knows who is asking); the default "none" passes nothing. It is fixed at registration and reviewed
+	// with the release.
+	Identity string `json:"identity,omitempty"`
 }
 
 // RegisterServer adds a DRAFT server after the endpoint passed the upstream policy.
@@ -96,6 +100,12 @@ func (s *Service) RegisterServer(ctx context.Context, p Principal, in RegisterIn
 	if in.DisplayName == "" || len(in.DisplayName) > 120 {
 		return nil, fail(http.StatusBadRequest, "displayName must be 1-120 characters")
 	}
+	if in.Identity == "" {
+		in.Identity = release.IdentityNone
+	}
+	if in.Identity != release.IdentityNone && in.Identity != release.IdentityForward {
+		return nil, fail(http.StatusBadRequest, "identity must be none or forward")
+	}
 	u, err := s.Policy.CheckEndpoint(ctx, in.Endpoint)
 	if err != nil {
 		return nil, fail(http.StatusBadRequest, "%s", err.Error())
@@ -103,14 +113,14 @@ func (s *Service) RegisterServer(ctx context.Context, p Principal, in RegisterIn
 	id := NewID()
 	var out *Server
 	err = s.Store.InTenant(ctx, p.Tenant, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO servers (id, tenant_id, target_name, display_name, endpoint, network, lifecycle, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, 'DRAFT', $7)`, id, p.Tenant, in.TargetName, in.DisplayName, u.String(), s.Policy.NetworkOf(u), p.Subject); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO servers (id, tenant_id, target_name, display_name, endpoint, network, identity, lifecycle, created_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 'DRAFT', $8)`, id, p.Tenant, in.TargetName, in.DisplayName, u.String(), s.Policy.NetworkOf(u), in.Identity, p.Subject); err != nil {
 			if strings.Contains(err.Error(), "duplicate key") {
 				return fail(http.StatusConflict, "a server with this targetName or endpoint is already registered")
 			}
 			return err
 		}
-		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.register", id, map[string]string{"endpoint": client.Redact(u.String()), "targetName": in.TargetName}); err != nil {
+		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.register", id, map[string]string{"endpoint": client.Redact(u.String()), "targetName": in.TargetName, "identity": in.Identity}); err != nil {
 			return err
 		}
 		var err error

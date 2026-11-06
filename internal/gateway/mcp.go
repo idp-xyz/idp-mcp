@@ -162,6 +162,7 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r = r.WithContext(withPrincipal(r.Context(), pr))
 	if req.IsNotification() {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -282,6 +283,9 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 	if len(observe) > 0 {
 		seen = observe[0]
 	}
+	// the caller key is the gateway's: a client's own is removed; a target approved for identity gets the verified one
+	caller, known := principalFrom(r.Context())
+	params = stampCaller(params, identityOf(st.doc, endpoint), caller, known)
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "method": req.Method, "params": params})
 	ctx, cancel := context.WithTimeout(r.Context(), g.cfg.CallTimeout)
 	defer cancel()

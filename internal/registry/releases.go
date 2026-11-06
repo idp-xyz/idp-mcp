@@ -271,7 +271,7 @@ func (s *Service) CompileRelease(ctx context.Context, p Principal, gatewayID str
 		if err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT gr.id::text, gr.tools, gr.prompts, gr.resources, gr.roles, s.id::text, s.target_name, s.endpoint, s.network, sn.digest, sn.tools, sn.prompts, sn.resources, sn.resource_templates,
+		rows, err := tx.Query(ctx, `SELECT gr.id::text, gr.tools, gr.prompts, gr.resources, gr.roles, s.id::text, s.target_name, s.endpoint, s.network, s.identity, sn.digest, sn.tools, sn.prompts, sn.resources, sn.resource_templates,
 			coalesce(sn.discovery->'capabilities', '{}'::jsonb)
 			FROM grants gr JOIN servers s ON s.id = gr.server_id JOIN snapshots sn ON sn.id = s.approved_snapshot_id
 			WHERE gr.status = 'APPROVED' AND s.lifecycle = 'APPROVED' ORDER BY s.target_name, gr.id`)
@@ -281,11 +281,11 @@ func (s *Service) CompileRelease(ctx context.Context, p Principal, gatewayID str
 		targets := map[string]*release.Target{}
 		var grants []release.Grant
 		for rows.Next() {
-			var gid, sid, name, endpoint, network, digest, toolsRaw, promptsRaw, resourcesRaw, templatesRaw string
+			var gid, sid, name, endpoint, network, identity, digest, toolsRaw, promptsRaw, resourcesRaw, templatesRaw string
 			var tools, prompts, roles []string
 			var resources bool
 			var capObj map[string]any
-			if err := rows.Scan(&gid, &tools, &prompts, &resources, &roles, &sid, &name, &endpoint, &network, &digest, &toolsRaw, &promptsRaw, &resourcesRaw, &templatesRaw, &capObj); err != nil {
+			if err := rows.Scan(&gid, &tools, &prompts, &resources, &roles, &sid, &name, &endpoint, &network, &identity, &digest, &toolsRaw, &promptsRaw, &resourcesRaw, &templatesRaw, &capObj); err != nil {
 				rows.Close()
 				return err
 			}
@@ -319,7 +319,7 @@ func (s *Service) CompileRelease(ctx context.Context, p Principal, gatewayID str
 				if len(pinnedTemplates) == 0 {
 					pinnedTemplates = nil
 				}
-				targets[name] = &release.Target{Name: name, ServerID: sid, Endpoint: endpoint, Network: network, SnapshotDigest: digest,
+				targets[name] = &release.Target{Name: name, ServerID: sid, Endpoint: endpoint, Network: network, Identity: release.IdentityOf(identity), SnapshotDigest: digest,
 					Tools: pinned, Prompts: pinnedPrompts, Resources: pinnedResources, ResourceTemplates: pinnedTemplates, Capabilities: federation.Capabilities(capObj)}
 			}
 			have := map[string]bool{}
