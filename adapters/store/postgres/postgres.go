@@ -22,7 +22,12 @@ type Store struct{ Pool *pgxpool.Pool }
 // Open connects as the service role and verifies that RLS applies to it: a superuser or a
 // BYPASSRLS role would silently see every tenant, so the service refuses to start with one.
 func Open(ctx context.Context, url string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	guardDial(&cfg.ConnConfig.Config) // a peer that vanished is noticed in seconds, not when TCP gives up
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
