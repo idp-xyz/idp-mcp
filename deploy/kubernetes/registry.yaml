@@ -86,9 +86,9 @@ spec:
               port: https
               scheme: HTTPS
             periodSeconds: 5
-          livenessProbe:
+          livenessProbe:   # the process only: /api/v1/health asks the database, and a database failover must not restart the registry
             httpGet:
-              path: /api/v1/health
+              path: /healthz
               port: https
               scheme: HTTPS
             periodSeconds: 20

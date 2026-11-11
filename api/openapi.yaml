@@ -30,9 +30,16 @@ tags:
   - name: Internal
 
 paths:
+  /healthz:
+    get:
+      summary: Liveness (the process answers; the database is not asked)
+      security: []
+      responses:
+        '200': {description: live, content: {application/json: {schema: {type: object}}}}
+
   /api/v1/health:
     get:
-      summary: Liveness and database reachability
+      summary: Readiness (the database is reachable)
       security: []
       responses:
         '200': {description: ok, content: {application/json: {schema: {type: object}}}}

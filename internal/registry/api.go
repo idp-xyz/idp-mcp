@@ -112,6 +112,11 @@ func (a *API) routes(handle func(pattern string, h http.HandlerFunc)) {
 	m := struct {
 		HandleFunc func(string, http.HandlerFunc)
 	}{handle}
+	// liveness: the process answers. Not the database: a liveness probe on /api/v1/health had the kubelet restart the registry
+	// after a minute of database failover, and again and again in a longer outage, which a restart does not cure
+	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		transport.WriteJSON(w, http.StatusOK, map[string]string{"status": "live"})
+	})
 	m.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		if err := a.Svc.Store.Pool.Ping(r.Context()); err != nil {
 			transport.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "database unavailable"})
