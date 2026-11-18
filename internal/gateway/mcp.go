@@ -285,7 +285,12 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 	}
 	// the caller key is the gateway's: a client's own is removed; a target approved for identity gets the verified one
 	caller, known := principalFrom(r.Context())
-	params = stampCaller(params, identityOf(st.doc, endpoint), caller, known)
+	params, err := stampCaller(params, identityOf(st.doc, endpoint), caller, known, g.cfg.CallerSigner, endpoint, req.Method)
+	if err != nil { // the signing key failed: send nothing rather than an identity the upstream cannot check
+		g.cfg.Log.Error("caller assertion", "err", err)
+		g.upstreamError(w, req.ID, http.StatusBadGateway, "Upstream unavailable; the call was not delivered", invocation.OutcomeNotDelivered)
+		return invocation.OutcomeNotDelivered
+	}
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "method": req.Method, "params": params})
 	ctx, cancel := context.WithTimeout(r.Context(), g.cfg.CallTimeout)
 	defer cancel()

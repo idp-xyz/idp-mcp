@@ -28,6 +28,9 @@ data:
   IDP_UPSTREAM_CA_FILE: "/etc/idp/upstream-ca/ca.crt"
   IDP_CALL_TIMEOUT: "60s"
   IDP_DRIFT_INTERVAL: "60s"
+  # The key that signs the caller forwarded to targets approved for identity (ADR-0001 D44): a P-256 private key in
+  # a Secret mounted read-only (one key for all replicas); give its public half to those upstreams.
+  # IDP_GATEWAY_CALLER_KEY_FILE: "/etc/idp/caller/caller.key"
   IDP_LOG_LEVEL: "info"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
 ---

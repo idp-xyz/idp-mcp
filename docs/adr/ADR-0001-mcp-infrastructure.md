@@ -219,8 +219,25 @@ MCP 基础设施把模型可调用的工具目录、认证授权和调用审计�
 | D40 | **目标有 `identity` 属性：`none`（默认）或 `forward`**。注册服务器时设定（`POST /api/v1/servers` 的 `identity`，之后不可改），编译进 Release 的 `targets[].identity`（`none` 时省略，所以已有 Release 的摘要不变）。`forward` 的目标，网关在发给它的每个请求的 `_meta["io.idp.telos/caller"]` 里放经过认证的调用者：`subject`、`tenant`、`roles`，以及 `client`（azp）与 `actor`（RFC 8693 的 act）。审计字段沿用，授权仍只看 subject、tenant、roles | 哪些服务器能知道"是谁在调用"是一个应当由审批人看见并批准的事：它在 Release 里，改它就改摘要，要经他人审批才能部署 |
 | D41 | **`io.idp.telos/caller` 是网关的键：对每一个转发的请求，先删除客户端自带的同名键，再（仅对 `forward` 的目标）写入网关自己认证出的值** | 上游若信任这个键，就必须能信任它来自网关的认证，而不是调用者自己填的。测试 `TestNoIdentityIsForwardedByDefaultAndForgeryIsStripped`、`TestForwardIdentityPassesTheVerifiedCaller`（伪造的 admin 被覆盖） |
 | D42 | **范围**：`tools/call`、`prompts/get`、`resources/read`、`completion/complete`、tasks 的请求都经同一个转发函数，所以都带。`subscriptions/listen` 的中继是网关自己对上游开的流、不属于某个调用者，所以不带身份（它本来就不转发客户端的 `_meta`） | 一个流服务多个订阅者时没有"那个调用者" |
-| D43 | **这一跳本身仍然没有认证**：上游靠"只有网关能到达它的私网"相信网关（与此前一样）；转发身份没有改变这一点，也没有给身份签名 | 签名需要网关与上游之间的密钥分发，是另一个决策；这里只解决"上游能知道是谁"，不解决"上游能证明是网关告诉它的" |
+| D43 | **这一跳本身仍然没有认证**：上游靠"只有网关能到达它的私网"相信网关（与此前一样）；转发身份没有改变这一点，也没有给身份签名 | 签名需要网关与上游之间的密钥分发，是另一个决策；这里只解决"上游能知道是谁"，不解决"上游能证明是网关告诉它的"（2026-11-17 起由 D44 解决：网关有密钥时给调用者签名） |
 
 **契约**：`idp.telos.mcp` 1.0.0 → **1.1.0**，只有向后兼容的新增（Target 的可选 `identity`，枚举只有 `forward`）。OpenAPI 1.1.0 的 `identity` 同理。迁移 `0007_server_identity.sql`。
 
 **验证**：release 的单元（省略与摘要、未知取值被拒、`IdentityOf`）；网关的单元（转发、伪造被覆盖、默认不转发、不改动输入）；契约一致性测试；idp-sandbox 的端到端经真实的注册服务与网关验证了整条链（以该服务器 `identity: forward` 注册，沙箱按调用者隔离工作区）。
+
+## 13. M7：给转发的调用者签名（2026-11-17）
+
+起因：D43 留下的缺口。上游只能靠"只有网关能到达它的私网"相信 `io.idp.telos/caller`；这个网络上任何别的东西（另一个被攻破的上游、一个配错的端口）都能自称任何调用者。idp-sandbox 把工作区绑在这个身份上，所以它的隔离只和网络策略一样强。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| D44 | **网关给转发的调用者签名**。`IDP_GATEWAY_CALLER_KEY_FILE` 是一把 P-256 私钥（PEM，PKCS #8 或 SEC 1）。设了之后，发给 `forward` 目标的每个请求在 `_meta["io.idp.telos/caller-assertion"]` 里多一个紧凑 JWS（ES256，`typ` = `idp-caller+jwt`，`kid` = 公钥的 RFC 7638 指纹）。声明：`iss` = `idp-mcp-gateway:<网关 id>`；`aud` = 这个目标在 Release 里的 `endpoint`；`sub`、`tenant_id`、`roles`、`client`、`actor` 与 `io.idp.telos/caller` 相同；`iat`、`exp`（60 秒）、`jti`（随机）；`req` = 这次请求的摘要，即 `{"method", "params"}`（`params` 去掉 `_meta`）的规范化 JSON（`release.Canonical`：键排序、无多余空白、不转义 HTML、数字照原样）的 SHA-256。`io.idp.telos/caller-assertion` 与 D41 的键一样归网关：客户端自带的一律先删除。签名失败就不发送（`NOT_DELIVERED`），不退回成不签名。没设密钥时行为与 D43 相同，启动时写一条告警 | 用非对称签名：上游只有公钥，一个上游被攻破也造不出别的调用者（共享密钥做不到）。`aud` 让发给一个上游的断言不能拿到另一个上游去用。`req`、`jti` 与一分钟的有效期让截获的断言不能换参数再用，同一个请求也只会被接受一次（由上游记 `jti`）。摘要算的是 JSON 的值而不是字节：网关重新编码 `params` 时会去掉空白、改写转义，上游按同一规则各算各的 |
+| D45 | **密钥是网关的部署属性，不进 Release；公钥由运维交给上游**（`openssl ec -in caller.key -pubout`）。同一个网关的多个副本共用一把。轮换：上游可以同时持有几把公钥（按 `kid` 选），先给上游加上新公钥，再换网关的私钥，最后去掉旧公钥。网关不提供 JWKS 端点 | 哪些目标能收到身份仍由 Release 的 `identity` 决定并经审批（D40）；用哪把钥匙签是运行环境的事。上游在启动时就该有公钥：运行时去网关取，等于又要先相信网络一次 |
+
+**没有做的**：
+- 上游的回答没有签名，网关到上游的连接可以是明文 HTTP。断言防的是伪造与重放，不防窃听与篡改回答；要防这两样，上游用 https（`IDP_UPSTREAM_CA_FILE`）。
+- `subscriptions/listen` 的中继不带身份（D42），所以也没有断言。
+- Kubernetes 清单里只留了注释掉的配置（`deploy/kubernetes/gateway.yaml`），没有在集群上验证过。
+- 契约 `idp.telos.mcp` 没有变：断言是 `_meta` 里的约定，不是 Release、Envelope 或 InvocationRecord 的一部分。
+
+**验证**：网关的单元测试 `TestForwardedIdentityIsSignedForTheTargetAndTheRequest`（上游用公钥验得过；`aud` 是端点、`req` 是上游实际收到的请求的摘要、有效期 60 秒、每次调用一个新的断言；客户端伪造的断言被换掉）、`TestNoAssertionWithoutApprovalAndAForgedOneIsStripped`、`TestCallerSignerTakesOnlyAP256Key`、`TestRequestDigestIsTheOneUpstreamsCompute`（同一个请求换一种写法摘要不变；这个请求与摘要也钉在 idp-sandbox 的测试里，连同本签名器为它签出的一个断言）。端到端：idp-sandbox 的 `deploy/e2e.sh`（真实的注册服务与网关，网关带密钥，沙箱只认签名）全部检查通过，沙箱网络上一个不经网关、自称 `agent-host` 的直接调用得到 403。

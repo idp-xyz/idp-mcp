@@ -47,6 +47,9 @@ type Config struct {
 	Tracer        trace.TracerProvider   // optional; default: SDK provider without exporter
 	Metrics       *observability.Metrics // optional; default: a fresh registry (see Metrics())
 	Log           *slog.Logger
+	// CallerSigner signs the caller forwarded to targets approved for identity (ADR-0001 D44); nil sends the
+	// caller unsigned, and the upstream then has only the network to trust.
+	CallerSigner *CallerSigner
 }
 
 // Target health as last checked against the pinned catalog.

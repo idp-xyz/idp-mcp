@@ -34,6 +34,7 @@ type fakeUpstream struct {
 	delay    time.Duration // before answering tools/call
 	requests []*http.Request
 	bodies   []map[string]any
+	raw      [][]byte // the tools/call bodies as received
 }
 
 const echoSchema = `{"type":"object","properties":{"text":{"type":"string","maxLength":512}},"required":["text"]}`
@@ -61,6 +62,7 @@ func newUpstream(t *testing.T) *fakeUpstream {
 			f.mu.Lock()
 			f.requests = append(f.requests, r.Clone(context.Background()))
 			f.bodies = append(f.bodies, req)
+			f.raw = append(f.raw, raw)
 			sse, delay := f.sse, f.delay
 			f.mu.Unlock()
 			if delay > 0 {

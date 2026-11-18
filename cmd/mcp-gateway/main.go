@@ -22,6 +22,9 @@
 //	                           (certificate URI SAN spiffe://idp-mcp/gateway/<IDP_GATEWAY_ID>)
 //	IDP_UPSTREAM_CA_FILE       extra trusted CAs for https MCP servers
 //	IDP_IDENTITY_CA_FILE       extra trusted CAs for the JWKS endpoint
+//	IDP_GATEWAY_CALLER_KEY_FILE  PEM P-256 private key: the gateway signs the caller it forwards to targets
+//	                           approved for identity (_meta io.idp.telos/caller-assertion, ADR-0001 D44); the
+//	                           upstream verifies it with the public key. Unset: the caller is forwarded unsigned
 //	OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_HEADERS /
 //	OTEL_EXPORTER_OTLP_CERTIFICATE / OTEL_SERVICE_NAME   OTLP/HTTP trace export (off without an endpoint)
 package main
@@ -134,6 +137,18 @@ func run(log *slog.Logger) error {
 		IdentityHTTP: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: identityTLS}},
 		DevMode:      env("IDP_DEV_MODE", "false") == "true", AllowedHosts: hosts,
 		CallTimeout: duration("IDP_CALL_TIMEOUT", 60*time.Second), DriftInterval: duration("IDP_DRIFT_INTERVAL", time.Minute), Log: log}
+	if f := env("IDP_GATEWAY_CALLER_KEY_FILE", ""); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return fmt.Errorf("IDP_GATEWAY_CALLER_KEY_FILE: %w", err)
+		}
+		if cfg.CallerSigner, err = gateway.NewCallerSigner(b, "idp-mcp-gateway:"+id); err != nil {
+			return fmt.Errorf("IDP_GATEWAY_CALLER_KEY_FILE: %w", err)
+		}
+		log.Info("the forwarded caller is signed", "kid", cfg.CallerSigner.KeyID())
+	} else {
+		log.Warn("the forwarded caller is not signed: upstreams approved for identity can only trust the network (set IDP_GATEWAY_CALLER_KEY_FILE)")
+	}
 	var sync *gateway.RegistrySync
 	var batcher *invocation.Batcher
 	if registry != "" {
