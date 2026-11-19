@@ -1,9 +1,11 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -141,7 +143,20 @@ func (a *API) routes(handle func(pattern string, h http.HandlerFunc)) {
 		return one(a.Svc.DiscoverServer(r.Context(), p, r.PathValue("id")))
 	}))
 	m.HandleFunc("POST /api/v1/servers/{id}/approve", a.admin(func(r *http.Request, p Principal) (int, any, error) {
-		return one(a.Svc.ApproveServer(r.Context(), p, r.PathValue("id")))
+		var in struct {
+			Digest string `json:"digest"`
+		}
+		if body, _ := io.ReadAll(http.MaxBytesReader(nil, r.Body, 1<<16)); len(bytes.TrimSpace(body)) > 0 {
+			dec := json.NewDecoder(bytes.NewReader(body))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&in); err != nil {
+				return 0, nil, fail(http.StatusBadRequest, "invalid JSON body: %s", err.Error())
+			}
+		}
+		return one(a.Svc.ApproveServer(r.Context(), p, r.PathValue("id"), in.Digest))
+	}))
+	m.HandleFunc("GET /api/v1/servers/{id}/catalog", a.admin(func(r *http.Request, p Principal) (int, any, error) {
+		return one(a.Svc.GetCatalog(r.Context(), p, r.PathValue("id")))
 	}))
 	m.HandleFunc("POST /api/v1/grants", a.admin(func(r *http.Request, p Principal) (int, any, error) {
 		var in GrantInput

@@ -58,15 +58,27 @@ func NewHTTPClient(pol *policy.Upstream, timeout time.Duration, tlsCfg ...*tls.C
 type Client struct {
 	HTTP *http.Client
 	Info server.ServerInfo // clientInfo sent in _meta
+	// Anonymous sends neither clientInfo nor trace context: the client the gateway and the registry use toward a
+	// server of class external, which is told nothing about its caller, not even which program and version asks
+	// (ADR-0001 D51 b).
+	Anonymous bool
+}
+
+// Anonymized returns a client that shares c's connections but sends nothing that identifies the caller.
+func (c *Client) Anonymized() *Client {
+	return &Client{HTTP: c.HTTP, Info: c.Info, Anonymous: true}
 }
 
 // Meta is the _meta envelope this client sends.
 func (c *Client) Meta() map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		server.MetaProtocolVersion:    server.ProtocolVersion,
-		server.MetaClientInfo:         c.Info,
 		server.MetaClientCapabilities: map[string]any{},
 	}
+	if !c.Anonymous {
+		m[server.MetaClientInfo] = c.Info
+	}
+	return m
 }
 
 // Headers returns the request headers for method, including Mcp-Name for named requests (in its
@@ -108,7 +120,9 @@ func (c *Client) Call(ctx context.Context, endpoint, method string, params map[s
 		return nil, err
 	}
 	req.Header = Headers(method, name)
-	observability.Propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
+	if !c.Anonymous {
+		observability.Propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("upstream unreachable: %w", err)

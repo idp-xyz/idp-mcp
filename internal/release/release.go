@@ -109,7 +109,13 @@ type Target struct {
 	// Identity "forward": the gateway puts the verified caller into _meta of every request it sends to this
 	// target (ADR-0001 D31). Part of the release, so a reviewer approves which servers learn who is asking.
 	// Empty means nothing is forwarded; the field is omitted then, so existing digests do not change.
-	Identity       string          `json:"identity,omitempty"`
+	Identity string `json:"identity,omitempty"`
+	// Class "external": the server is not ours (ADR-0001 D50). The gateway then enforces, whatever else the target
+	// says, the controls of D51: no identity, an allow-list of _meta keys, no requests from the server to the client,
+	// bounded results, arguments checked against the pinned schema, calls blocked while the catalog cannot be
+	// verified, and every tool marked in tools/list. Empty means internal, the class of every server before D50; the
+	// field is omitted then, so existing digests do not change. Part of the release, so the reviewer approves it.
+	Class          string          `json:"class,omitempty"`
 	SnapshotDigest string          `json:"snapshotDigest"` // CatalogDigest(Tools, Prompts): the full approved catalog
 	Tools          []server.Tool   `json:"tools"`          // native names
 	Prompts        []server.Prompt `json:"prompts"`        // native names; pinned like tools (M3)
@@ -136,6 +142,23 @@ func IdentityOf(stored string) string {
 	}
 	return ""
 }
+
+// Classes of a target (ADR-0001 D50): the registry stores "internal" and "external"; a release omits "internal".
+const (
+	ClassInternal = "internal"
+	ClassExternal = "external"
+)
+
+// ClassOf maps a stored class to its release form: "internal" is omitted.
+func ClassOf(stored string) string {
+	if stored == ClassExternal {
+		return ClassExternal
+	}
+	return ""
+}
+
+// External reports whether the target is of class external.
+func (t *Target) External() bool { return t.Class == ClassExternal }
 
 // Network classes of a target.
 const (
@@ -360,6 +383,12 @@ func (d *Document) Validate() error {
 		if t.Identity != "" && t.Identity != IdentityForward {
 			bad("target %s: identity must be omitted or forward", t.Name)
 		}
+		if t.Class != "" && t.Class != ClassExternal {
+			bad("target %s: class must be omitted or external", t.Name)
+		}
+		if t.External() && t.Identity != "" {
+			bad("target %s: an external target cannot be sent the caller's identity", t.Name)
+		}
 		if dg, err := t.Catalog().Digest(); err != nil || dg != t.SnapshotDigest {
 			bad("target %s: catalog does not match snapshotDigest", t.Name)
 		}
@@ -369,6 +398,9 @@ func (d *Document) Validate() error {
 			case CapTools, CapPrompts, CapResources, CapCompletions, CapResourcesSubscribe, CapResourcesListChanged, CapTasks:
 			default:
 				bad("target %s: unknown capability %q", t.Name, c)
+			}
+			if t.External() && (c == CapTasks || c == CapResourcesSubscribe || c == CapResourcesListChanged) {
+				bad("target %s: an external target cannot use %s, which would relay what the server pushes", t.Name, c)
 			}
 			caps[t.Name][c] = true
 		}

@@ -236,10 +236,7 @@ func (g *Gateway) promptsGet(w http.ResponseWriter, r *http.Request, st *state, 
 		transport.WriteError(w, http.StatusOK, req.ID, &server.Error{Code: server.CodeInvalidParams, Message: "Unknown prompt: " + p.Name})
 		return
 	}
-	if st.blocked(target) {
-		rec.done(target, invocation.Allow, invocation.OutcomeNotDelivered)
-		transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError,
-			Message: "Prompt temporarily unavailable: the upstream catalog changed since approval"})
+	if g.refuseBlocked(w, st, req, rec, target, "Prompt") {
 		return
 	}
 	params := rawParams(req)
@@ -315,10 +312,7 @@ func (g *Gateway) resourcesRead(w http.ResponseWriter, r *http.Request, st *stat
 		transport.WriteError(w, http.StatusOK, req.ID, resourceNotFound(p.URI))
 		return
 	}
-	if st.blocked(target) {
-		rec.done(target, invocation.Allow, invocation.OutcomeNotDelivered)
-		transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError,
-			Message: "Resource temporarily unavailable: the upstream catalog changed since approval"})
+	if g.refuseBlocked(w, st, req, rec, target, "Resource") {
 		return
 	}
 	rec.done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), p.URI, rawParams(req), rec.to(target)))
@@ -353,6 +347,9 @@ func (g *Gateway) complete(w http.ResponseWriter, r *http.Request, st *state, re
 		_ = json.Unmarshal(params["ref"], &ref)
 		ref["name"], _ = json.Marshal(native)
 		params["ref"], _ = json.Marshal(ref)
+		if st.isExternal(target) && g.refuseBlocked(w, st, req, rec, target, "Completion") {
+			return
+		}
 		rec.done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params, rec.to(target)))
 	case "ref/resource":
 		rec := g.recorder(r, st, pr, req, p.Ref.URI)
@@ -360,6 +357,9 @@ func (g *Gateway) complete(w http.ResponseWriter, r *http.Request, st *state, re
 			rec.reason(g.refusal(st, pr, ""))
 			rec.done("", invocation.Deny, invocation.OutcomeDenied)
 			transport.WriteError(w, http.StatusOK, req.ID, resourceNotFound(p.Ref.URI))
+			return
+		}
+		if st.isExternal(target) && g.refuseBlocked(w, st, req, rec, target, "Completion") {
 			return
 		}
 		rec.done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params, rec.to(target)))

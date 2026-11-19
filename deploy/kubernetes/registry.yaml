@@ -21,6 +21,12 @@ data:
   IDP_ADMIN_JWKS_URL: "https://idp.example.com/realms/idp/protocol/openid-connect/certs"
   IDP_ALLOWED_UPSTREAM_HOSTS: "mcp-a.tools.svc.cluster.local,mcp-b.tools.svc.cluster.local"
   IDP_PRIVATE_UPSTREAM_HOSTS: "mcp-a.tools.svc.cluster.local,mcp-b.tools.svc.cluster.local"
+  # A server registered at one of these (hosts, host:port, or http(s) URL prefixes, comma separated) must be of class
+  # external (ADR-0001 D50): set it to the bridge's address once there is one. Empty: no address is named.
+  IDP_BRIDGE_ENDPOINTS: ""
+  # The longest description, in bytes, in the catalog of a server of class external (D53); over it, discovery is refused
+  # and names the tool.
+  IDP_EXTERNAL_MAX_DESCRIPTION: "1024"
   IDP_DEPLOY_TIMEOUT: "60s"
   IDP_TLS_CERT_FILE: "/etc/idp/tls/tls.crt"
   IDP_TLS_KEY_FILE: "/etc/idp/tls/tls.key"

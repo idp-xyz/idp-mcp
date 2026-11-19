@@ -19,6 +19,10 @@
 //	IDP_DEV_ADMIN_SECRET[_FILE]  HS256 admin token secret (dev mode only, >= 32 bytes)
 //	IDP_ALLOWED_UPSTREAM_HOSTS   hosts MCP servers may be registered on, comma separated
 //	IDP_PRIVATE_UPSTREAM_HOSTS   of those, the ones that may resolve to private addresses
+//	IDP_BRIDGE_ENDPOINTS         addresses of the bridge endpoints, comma separated: hosts (host or host:port) or
+//	                             http(s) URL prefixes. A server registered at one must be of class external
+//	                             (ADR-0001 D50). Empty by default
+//	IDP_EXTERNAL_MAX_DESCRIPTION longest description, in bytes, in the catalog of an external server (1024; D53)
 //	IDP_DEPLOY_TIMEOUT           how long a deployment waits for the gateway's attestation (30s)
 //	IDP_INSTANCE_STALE_AFTER     a gateway instance silent for longer no longer counts (30s)
 //	IDP_METRICS_LISTEN           serve Prometheus metrics (/metrics) on this address; off when unset
@@ -39,6 +43,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -194,7 +199,15 @@ func serve(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("IDP_INSTANCE_STALE_AFTER: %w", err)
 	}
-	svc := &registry.Service{Store: store, Policy: pol, DeployTimeout: deployTimeout, PollEvery: 250 * time.Millisecond, StaleAfter: staleAfter, Log: log,
+	bridges, err := policy.ParseEndpoints(env("IDP_BRIDGE_ENDPOINTS", ""))
+	if err != nil {
+		return fmt.Errorf("IDP_BRIDGE_ENDPOINTS: %w", err)
+	}
+	maxDesc, err := strconv.Atoi(env("IDP_EXTERNAL_MAX_DESCRIPTION", strconv.Itoa(registry.DefaultMaxExternalDescription)))
+	if err != nil || maxDesc < 1 {
+		return errors.New("IDP_EXTERNAL_MAX_DESCRIPTION must be a positive number of bytes")
+	}
+	svc := &registry.Service{Store: store, Policy: pol, Bridges: bridges, MaxExternalDescription: maxDesc, DeployTimeout: deployTimeout, PollEvery: 250 * time.Millisecond, StaleAfter: staleAfter, Log: log,
 		Upstream: &client.Client{HTTP: client.NewHTTPClient(pol, 15*time.Second, upstreamTLS), Info: server.ServerInfo{Name: "idp-mcp-registry", Version: version}}}
 	certFile, keyFile, clientCA := env("IDP_TLS_CERT_FILE", ""), env("IDP_TLS_KEY_FILE", ""), env("IDP_GATEWAY_CLIENT_CA_FILE", "")
 	if clientCA != "" && certFile == "" {

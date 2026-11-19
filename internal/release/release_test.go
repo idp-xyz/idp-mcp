@@ -210,3 +210,29 @@ func TestIdentityModeIsValidatedAndOmittedWhenNone(t *testing.T) {
 		t.Fatal("IdentityOf")
 	}
 }
+
+func TestClassIsOmittedForInternalTargetsSoExistingDigestsDoNotChange(t *testing.T) {
+	base, err := Seal(sample())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(base.Document), "class") {
+		t.Fatal("an internal target must not mention its class in the canonical release (existing digests must not change)")
+	}
+	if ClassOf("internal") != "" || ClassOf("") != "" || ClassOf(ClassExternal) != ClassExternal {
+		t.Fatal("ClassOf")
+	}
+	d := sample()
+	d.Targets[0].Class = ClassExternal
+	env, err := Seal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.Digest == base.Digest || !strings.Contains(string(env.Document), `"class":"external"`) {
+		t.Fatal("the class is not pinned in the digest")
+	}
+	d.Targets[0].Class = "internal"
+	if _, err := Seal(d); err == nil {
+		t.Fatal(`the stored word "internal" must not appear in a release`)
+	}
+}

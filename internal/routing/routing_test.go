@@ -53,3 +53,38 @@ func TestNativeNamingAndPinnedPrompts(t *testing.T) {
 		t.Fatal("prefixed mode resolved an unprefixed name")
 	}
 }
+
+func TestTheExternalMarkerIsTheGatewaysAloneForAnyUpstream(t *testing.T) {
+	mark := func(v any) server.Tool {
+		return server.Tool{Name: "t", Description: "d", Extra: map[string]any{"_meta": map[string]any{server.MetaExternal: v, "k": "v"}, "icons": []any{}}}
+	}
+	r := New(&release.Document{ToolNaming: release.NamingPrefixed, Targets: []release.Target{
+		{Name: "ours", Endpoint: "http://a/mcp", Tools: []server.Tool{mark(true), {Name: "bare"}, {Name: "oddmeta", Extra: map[string]any{"_meta": "text"}}}},
+		{Name: "theirs", Class: release.ClassExternal, Endpoint: "http://b/mcp", Tools: []server.Tool{mark(false), {Name: "bare"}}},
+	}})
+	meta := func(name string) map[string]any {
+		rt, _ := r.Lookup(name)
+		m, _ := rt.Listed().Extra["_meta"].(map[string]any)
+		return m
+	}
+	if m := meta("ours__t"); m[server.MetaExternal] != nil || m["k"] != "v" {
+		t.Errorf("an internal upstream's own marker was served: %v", m)
+	}
+	if m := meta("theirs__t"); m[server.MetaExternal] != true || m["k"] != "v" {
+		t.Errorf("an external upstream's marker %v", m)
+	}
+	if m := meta("theirs__bare"); m[server.MetaExternal] != true || len(m) != 1 {
+		t.Errorf("a tool with no _meta of its own %v", m)
+	}
+	if rt, _ := r.Lookup("ours__bare"); rt.Listed().Extra["_meta"] != nil {
+		t.Error("an internal tool gained a _meta")
+	}
+	if rt, _ := r.Lookup("ours__oddmeta"); rt.Listed().Extra["_meta"] != "text" {
+		t.Error("an internal tool's own _meta was changed")
+	}
+	pinned, _ := r.Lookup("ours__t")
+	pinned.Listed()
+	if pinned.Tool.Extra["_meta"].(map[string]any)[server.MetaExternal] != true {
+		t.Error("Listed changed the pinned definition")
+	}
+}

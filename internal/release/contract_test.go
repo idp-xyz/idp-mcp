@@ -1,6 +1,6 @@
 package release
 
-// The published contract idp.telos.mcp 1.2.0 (idp-contracts/idp.telos.mcp/1.2.0) is produced here.
+// The published contract idp.telos.mcp 1.3.0 (idp-contracts/idp.telos.mcp/1.3.0) is produced here.
 // api/contracts/schema.json is written by hand; these tests prove it describes exactly what this
 // package seals and what the gateway records. api/contracts/examples.json is generated from Go
 // values (go test ./internal/release -run TestContract -update) and checked on every run, so every
@@ -29,7 +29,7 @@ var update = flag.Bool("update", false, "regenerate api/contracts/examples.json 
 
 const (
 	contractDir = "../../api/contracts"
-	contractID  = "urn:idp:telos:mcp:1.2.0"
+	contractID  = "urn:idp:telos:mcp:1.3.0"
 )
 
 type noLoader struct{}
@@ -160,6 +160,26 @@ func exampleDocuments(t *testing.T) (full, jwt *Document) {
 	return full, jwt
 }
 
+// exampleExternal is the release of a third party's server (ADR-0001 D50): class external, no identity, native
+// tools host-only by the release.
+func exampleExternal(t *testing.T) *Document {
+	t.Helper()
+	var lookup server.Tool
+	mustJSON(t, `{"name":"lookup_company","description":"Looks a company up in the register by name.","inputSchema":{"type":"object","properties":{"name":{"type":"string","maxLength":200}},"required":["name"],"additionalProperties":false},
+		"annotations":{"readOnlyHint":true,"openWorldHint":true}}`, &lookup)
+	partner := Target{Name: "registry-partner", ServerID: "srv-partner", Endpoint: "https://bridge.idp.svc:8443/connections/registry-partner/mcp", Network: NetworkPrivate, Class: ClassExternal,
+		Tools: []server.Tool{lookup}, Capabilities: []string{CapTools}}
+	var err error
+	if partner.SnapshotDigest, err = partner.Catalog().Digest(); err != nil {
+		t.Fatal(err)
+	}
+	return &Document{SchemaVersion: SchemaVersion, ReleaseID: "rel-2026-11-19-001", TenantID: "acme", GatewayID: "gw-edge-1",
+		CreatedAt: "2026-11-19T08:00:00Z", CreatedBy: "alice", ApprovedBy: "bob", DriftAction: "block", ToolNaming: NamingPrefixed,
+		Targets: []Target{partner},
+		Grants:  []Grant{{Target: "registry-partner", Tools: []string{"lookup_company"}, Roles: []string{"operator"}}},
+		Auth:    Auth{Mode: "api-key", APIKeys: []APIKey{{ID: "k-agent-1", Subject: "svc-agent", Roles: []string{"operator"}, SHA256: strings.Repeat("0123456789abcdef", 4)}}}}
+}
+
 func exampleRecords(t *testing.T, releaseDigest string) []invocation.Record {
 	t.Helper()
 	at := time.Date(2026, 11, 3, 10, 15, 0, 0, time.UTC)
@@ -186,6 +206,10 @@ func exampleRecords(t *testing.T, releaseDigest string) []invocation.Record {
 			Decision: invocation.Allow, Outcome: invocation.OutcomeStreamed, LatencyMS: 60000, Bytes: 512, Reason: "tools=true prompts=false resources=false subscriptions=0 tasks=0"},
 		{At: at.Add(6 * time.Second), ReleaseDigest: releaseDigest, Subject: "alice", Client: "partner-docs", AuthMethod: "jwt", Method: "tools/call", Tool: "*",
 			Decision: invocation.Deny, Outcome: invocation.OutcomeRateLimited, Reason: "client rate limit; retry after 12s"},
+		{At: at.Add(8 * time.Second), ReleaseDigest: releaseDigest, Subject: "alice", Client: "idp-host", AuthMethod: "jwt", Method: "tools/call", Tool: "registry-partner__lookup_company", Target: "registry-partner",
+			Decision: invocation.Allow, Outcome: invocation.OutcomeResultTooLarge, LatencyMS: 900, Bytes: 4194304, Reason: "the server's stream is longer than the limit of 4194304 bytes"},
+		{At: at.Add(9 * time.Second), ReleaseDigest: releaseDigest, Subject: "alice", Client: "idp-host", AuthMethod: "jwt", Method: "tools/call", Tool: "registry-partner__lookup_company", Target: "registry-partner",
+			Decision: invocation.Allow, Outcome: invocation.OutcomeReverseRefused, LatencyMS: 80, Reason: "the server sent the client a request (sampling/createMessage); a server of class external may not ask the client for anything"},
 		{At: at.Add(7 * time.Second), ReleaseDigest: releaseDigest, Subject: invocation.NoSubject, AuthMethod: "jwt", Method: "tools/list", Tool: invocation.Whole,
 			Decision: invocation.Deny, Outcome: invocation.OutcomeUnauthorized, Reason: "no bearer credential"},
 	}
@@ -223,12 +247,17 @@ func buildExamples(t *testing.T) []byte {
 	}
 	add("Release", json.RawMessage(fullEnv.Document))
 	add("Release", json.RawMessage(jwtEnv.Document))
+	extEnv, err := Seal(exampleExternal(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	add("Release", json.RawMessage(extEnv.Document))
 	add("Envelope", fullEnv)
 	for _, r := range exampleRecords(t, fullEnv.Digest) {
 		add("InvocationRecord", r)
 	}
 	b, err := json.MarshalIndent(examplesFile{
-		Description: "idp.telos.mcp 1.2.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
+		Description: "idp.telos.mcp 1.3.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
 		GeneratedBy: "go test ./internal/release -run TestContract -update",
 		Examples:    out,
 	}, "", "  ")

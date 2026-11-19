@@ -170,13 +170,21 @@ func TestPromptsAndResourcesFollowTheClientToo(t *testing.T) {
 	}
 }
 
-func TestEverythingOfAHostOnlyTargetIsHostOnlyWhenTheReleaseSaysSo(t *testing.T) {
-	// no release field says so yet (hostOnlyByRelease): the interop decision's step X1 will; the check is the same one
-	p := clientsPolicy(t, `clients:
+func TestEverythingOfAnExternalTargetIsHostOnlyBecauseOfItsClassAndNothingElseIs(t *testing.T) {
+	c, err := admission.Parse([]byte(`clients:
   idp-host: {kind: platform, host: true}
   plain: platform
-`)
-	p.hostOnlyTarget["ref"], p.hostOnlyTarget["minimal"] = true, true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := &release.Document{TenantID: "t1", ToolNaming: release.NamingPrefixed,
+		Targets: []release.Target{{Name: "minimal", Class: release.ClassExternal}, {Name: "ref", Class: release.ClassExternal}, {Name: "ours"}},
+		Grants: []release.Grant{
+			{Target: "minimal", Tools: []string{"echo"}, Roles: []string{"operator"}},
+			{Target: "ref", Prompts: []string{"*"}, Resources: true, Roles: []string{"operator"}},
+			{Target: "ours", Tools: []string{"echo"}, Prompts: []string{"*"}, Resources: true, Roles: []string{"operator"}}}}
+	p := Compile(doc, c)
 	as := func(client string) Principal {
 		return Principal{Subject: "a", Tenant: "t1", Roles: []string{"operator"}, Method: "jwt", Client: client}
 	}
@@ -188,6 +196,12 @@ func TestEverythingOfAHostOnlyTargetIsHostOnlyWhenTheReleaseSaysSo(t *testing.T)
 	}
 	if !p.AllowedResources(as("idp-host"), "ref") || p.AllowedResources(as("plain"), "ref") {
 		t.Error("resources")
+	}
+	if !p.Allowed(as("plain"), "ours", "echo") || !p.AllowedPrompt(as("plain"), "ours", "x") || !p.AllowedResources(as("plain"), "ours") {
+		t.Error("an internal target became host-only")
+	}
+	if got := p.VisibleTools(as("plain")); len(got) != 1 || got[0] != [2]string{"ours", "echo"} {
+		t.Errorf("a client that is not the host sees %v", got)
 	}
 }
 

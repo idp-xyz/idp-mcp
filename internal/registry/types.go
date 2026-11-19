@@ -97,6 +97,7 @@ type Server struct {
 	Endpoint           string    `json:"endpoint"`
 	Network            string    `json:"network"`
 	Identity           string    `json:"identity"` // "none" or "forward": the verified caller is passed to the server
+	Class              string    `json:"class"`    // "internal" or "external": a third party's server (ADR-0001 D50)
 	Lifecycle          string    `json:"lifecycle"`
 	SnapshotID         *string   `json:"snapshotId"`
 	ApprovedSnapshotID *string   `json:"approvedSnapshotId"`
@@ -181,6 +182,9 @@ type TargetStatus struct {
 	LiveDigest string    `json:"liveDigest,omitempty"`
 	CheckedAt  time.Time `json:"checkedAt,omitzero"`
 	Detail     string    `json:"detail,omitempty"`
+	Failures   int       `json:"failures,omitempty"`
+	Blocked    bool      `json:"blocked,omitempty"`
+	External   bool      `json:"external,omitempty"`
 }
 
 // Release is a compiled release and its lifecycle.

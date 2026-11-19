@@ -27,8 +27,13 @@ const (
 	// OutcomeStreamStarted marks the first of the two records of a streamed answer: the upstream began an event
 	// stream. The second, OutcomeStreamed, carries the end, the duration and the bytes (ADR-0001 D49).
 	OutcomeStreamStarted = "STREAM_STARTED"
-	OutcomeRateLimited   = "RATE_LIMITED"    // refused by the per-client or per-subject limit
-	OutcomeUnauthorized  = "UNAUTHENTICATED" // the credential was missing or refused
+	// Outcomes of a call to a target of class external (ADR-0001 D51): the answer was longer than the limit and the
+	// client was told so; the server asked the client for something (sampling, elicitation, ...) and the request was not
+	// relayed.
+	OutcomeResultTooLarge = "RESULT_TOO_LARGE"
+	OutcomeReverseRefused = "REVERSE_REQUEST_REFUSED"
+	OutcomeRateLimited    = "RATE_LIMITED"    // refused by the per-client or per-subject limit
+	OutcomeUnauthorized   = "UNAUTHENTICATED" // the credential was missing or refused
 )
 
 // What a record names when there is no subject (the caller was not authenticated) or no single tool, prompt,

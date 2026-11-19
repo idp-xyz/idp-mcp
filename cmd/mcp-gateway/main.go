@@ -26,6 +26,14 @@
 //	                           (certificate URI SAN spiffe://idp-mcp/gateway/<IDP_GATEWAY_ID>)
 //	IDP_UPSTREAM_CA_FILE       extra trusted CAs for https MCP servers
 //	IDP_IDENTITY_CA_FILE       extra trusted CAs for the JWKS endpoint
+//	IDP_BRIDGE_ENDPOINTS       addresses of the bridge endpoints (hosts or http(s) URL prefixes, comma separated; empty by
+//	                           default): a release with a target there that is not of class external is refused
+//	                           (ADR-0001 D50). Set it to what the registry has
+//	IDP_GATEWAY_EXTERNAL_MAX_RESULT_BYTES  longest answer, and longest event of a stream, from a target of class external
+//	                           (1048576; ADR-0001 D51 d)
+//	IDP_GATEWAY_EXTERNAL_MAX_STREAM_BYTES  most that a stream from such a target may carry (4194304)
+//	IDP_GATEWAY_EXTERNAL_PROBE_FAILURES    consecutive failed catalog probes after which calls to such a target are
+//	                           blocked until a probe succeeds (3; D51 f)
 //	IDP_GATEWAY_CALLER_KEY_FILE  PEM P-256 private key: the gateway signs the caller it forwards to targets
 //	                           approved for identity (_meta io.idp.telos/caller-assertion, ADR-0001 D44); the
 //	                           upstream verifies it with the public key. Unset: the caller is forwarded unsigned
@@ -42,6 +50,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -50,6 +59,7 @@ import (
 	"idp-mcp/internal/gateway"
 	"idp-mcp/internal/invocation"
 	"idp-mcp/internal/observability"
+	"idp-mcp/internal/policy"
 	"idp-mcp/internal/release"
 	"idp-mcp/internal/server"
 	"idp-mcp/internal/transport"
@@ -150,6 +160,25 @@ func run(log *slog.Logger) error {
 		DevMode:      env("IDP_DEV_MODE", "false") == "true", AllowedHosts: hosts,
 		Clients:     clients,
 		CallTimeout: duration("IDP_CALL_TIMEOUT", 60*time.Second), DriftInterval: duration("IDP_DRIFT_INTERVAL", time.Minute), Log: log}
+	if cfg.Bridges, err = policy.ParseEndpoints(env("IDP_BRIDGE_ENDPOINTS", "")); err != nil {
+		return fmt.Errorf("IDP_BRIDGE_ENDPOINTS: %w", err)
+	}
+	for key, dst := range map[string]*int64{"IDP_GATEWAY_EXTERNAL_MAX_RESULT_BYTES": &cfg.ExternalMaxResult, "IDP_GATEWAY_EXTERNAL_MAX_STREAM_BYTES": &cfg.ExternalMaxStream} {
+		if v := env(key, ""); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n < 1 || n > gateway.MaxUpstreamJSON {
+				return fmt.Errorf("%s must be a number of bytes from 1 to %d", key, gateway.MaxUpstreamJSON)
+			}
+			*dst = n
+		}
+	}
+	if v := env("IDP_GATEWAY_EXTERNAL_PROBE_FAILURES", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return errors.New("IDP_GATEWAY_EXTERNAL_PROBE_FAILURES must be a positive number")
+		}
+		cfg.ExternalProbeFailures = n
+	}
 	if f := env("IDP_GATEWAY_CALLER_KEY_FILE", ""); f != "" {
 		b, err := os.ReadFile(f)
 		if err != nil {

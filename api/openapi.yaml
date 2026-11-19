@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: idp-mcp registry-service API
-  version: 1.2.0
+  version: 1.3.0
   description: |
     Control plane of idp-mcp (docs/adr/ADR-0001-mcp-infrastructure.md).
 
@@ -61,6 +61,7 @@ paths:
                 displayName: {type: string, minLength: 1, maxLength: 120}
                 targetName: {type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'}
                 endpoint: {type: string, format: uri, description: 'http(s) URL ending in /mcp'}
+                class: {type: string, enum: [internal, external], default: internal, description: "external: a third party's server (ADR-0001 D50). The gateway forwards it no identity (identity must be none), only an allow-list of _meta, takes no request from it, bounds its results, checks arguments against the pinned schema, blocks calls while its catalog cannot be verified and marks its tools with io.idp.telos/external. Fixed at registration, reviewed and pinned in the release; to change it register the server again. A server at a bridge address (IDP_BRIDGE_ENDPOINTS) must be external; its descriptions are limited (IDP_EXTERNAL_MAX_DESCRIPTION)"}
                 identity: {type: string, enum: [none, forward], default: none, description: 'forward: the gateway passes the verified caller (io.idp.telos/caller in _meta) to this server with every call; fixed at registration and reviewed with the release (ADR-0001 D31)'}
       responses:
         '201': {description: registered (DRAFT), content: {application/json: {schema: {$ref: '#/components/schemas/Server'}}}}
@@ -94,11 +95,31 @@ paths:
         '422': {$ref: '#/components/responses/Error'}
         '502': {$ref: '#/components/responses/Error'}
 
+  /api/v1/servers/{id}/catalog:
+    parameters: [{$ref: '#/components/parameters/id'}]
+    get:
+      tags: [Registry]
+      summary: The reviewer's view - every tool, prompt and resource of the latest and the approved snapshot, in full, and what changed
+      description: |
+        Each tool with its complete description, input schema, output schema and annotations, as it would be pinned; the
+        same for prompts, resources and resource templates. `changes` compares the latest snapshot with the approved one
+        (with nothing approved yet, everything is added): per entry added, removed or changed, and for a changed one the
+        JSON keys that differ (description, inputSchema, annotations, ...). `latest.digest` is what to send to approve.
+      responses:
+        '200': {description: the catalogs and their difference, content: {application/json: {schema: {$ref: '#/components/schemas/CatalogView'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+
   /api/v1/servers/{id}/approve:
     parameters: [{$ref: '#/components/parameters/id'}]
     post:
       tags: [Registry]
       summary: Approve the latest snapshot (reviewer, four-eyes)
+      description: The body is optional for a server of class internal and required for one of class external. `digest` is the catalog digest the reviewer read; a latest snapshot with another digest is refused (409), so that a catalog discovered after the review is not approved unseen.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, properties: {digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}}}
       responses:
         '200': {description: approved, content: {application/json: {schema: {$ref: '#/components/schemas/Server'}}}}
         '403': {$ref: '#/components/responses/Error'}
@@ -358,6 +379,7 @@ components:
         endpoint: {type: string}
         network: {type: string, enum: [public, private, loopback]}
         identity: {type: string, enum: [none, forward]}
+        class: {type: string, enum: [internal, external]}
         lifecycle: {type: string, enum: [DRAFT, REVIEWED, APPROVED, RETIRED]}
         snapshotId: {type: [string, 'null']}
         approvedSnapshotId: {type: [string, 'null']}
@@ -368,6 +390,38 @@ components:
         createdBy: {type: string}
         approvedBy: {type: [string, 'null']}
         createdAt: {type: string, format: date-time}
+    CatalogEntryChange:
+      type: object
+      properties:
+        name: {type: string, description: 'tool or prompt name, resource uri or uri template'}
+        kind: {type: string, enum: [added, removed, changed]}
+        fields: {type: array, items: {type: string}, description: 'for changed: the JSON keys that differ'}
+    CatalogSnapshot:
+      type: object
+      properties:
+        snapshotId: {type: string, format: uuid}
+        digest: {type: string}
+        createdAt: {type: string, format: date-time}
+        tools: {type: array, items: {type: object, description: 'name, title, description, inputSchema, outputSchema, annotations and every other field, as pinned'}}
+        prompts: {type: array, items: {type: object}}
+        resources: {type: array, items: {type: object}}
+        resourceTemplates: {type: array, items: {type: object}}
+    CatalogView:
+      type: object
+      properties:
+        serverId: {type: string, format: uuid}
+        targetName: {type: string}
+        class: {type: string, enum: [internal, external]}
+        latest: {oneOf: [{$ref: '#/components/schemas/CatalogSnapshot'}, {type: 'null'}]}
+        approved: {oneOf: [{$ref: '#/components/schemas/CatalogSnapshot'}, {type: 'null'}]}
+        changes:
+          type: object
+          properties:
+            tools: {type: array, items: {$ref: '#/components/schemas/CatalogEntryChange'}}
+            prompts: {type: array, items: {$ref: '#/components/schemas/CatalogEntryChange'}}
+            resources: {type: array, items: {$ref: '#/components/schemas/CatalogEntryChange'}}
+            resourceTemplates: {type: array, items: {$ref: '#/components/schemas/CatalogEntryChange'}}
+            identical: {type: boolean}
     ServerList:
       type: object
       required: [items]
@@ -441,6 +495,9 @@ components:
               liveDigest: {type: string}
               checkedAt: {type: string, format: date-time}
               detail: {type: string}
+              failures: {type: integer, description: 'consecutive catalog probes that failed; reset by a probe that found the approved catalog'}
+              blocked: {type: boolean, description: 'calls to the target are refused now: drift (driftAction block) or, for an external target, an unverified catalog or too many failed probes'}
+              external: {type: boolean}
         invocationsDropped: {type: integer}
         lastError: {type: string}
         refusedDigest: {type: string}
@@ -494,7 +551,7 @@ components:
         tool: {type: string, description: 'tool or prompt name, or resource URI, as requested'}
         target: {type: string}
         decision: {type: string, enum: [ALLOW, DENY]}
-        outcome: {type: string, enum: [OK, TOOL_ERROR, RPC_ERROR, STREAMED, NOT_DELIVERED, UNKNOWN, DENIED, INVALID_ARGUMENTS, STREAM_STARTED, RATE_LIMITED, UNAUTHENTICATED]}
+        outcome: {type: string, enum: [OK, TOOL_ERROR, RPC_ERROR, STREAMED, NOT_DELIVERED, UNKNOWN, DENIED, INVALID_ARGUMENTS, STREAM_STARTED, RATE_LIMITED, UNAUTHENTICATED, RESULT_TOO_LARGE, REVERSE_REQUEST_REFUSED]}
         latencyMs: {type: integer}
         traceId: {type: string}
         argsDigest: {type: string}

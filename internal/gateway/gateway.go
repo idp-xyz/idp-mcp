@@ -55,7 +55,30 @@ type Config struct {
 	// holds the rate limits. Nil lists nobody, so every client sees nothing: the program refuses to start
 	// without the file, and a library user who forgets it gets the closed answer, not an open one.
 	Clients *admission.Clients
+	// Bridges lists the addresses of the bridge endpoints (ADR-0001 D50): a release that has a target at one of them
+	// and does not call it external is refused at activation, as the registry refuses the registration. Empty by
+	// default.
+	Bridges policy.Endpoints
+	// ExternalMaxResult bounds, in bytes, one answer from a target of class external, and one event of its event
+	// stream; ExternalMaxStream bounds all that such a stream carries (ADR-0001 D51 d). ExternalProbeFailures is how
+	// many consecutive failed catalog probes of an external target block calls to it (D51 f).
+	ExternalMaxResult     int64
+	ExternalMaxStream     int64
+	ExternalProbeFailures int
 }
+
+// Defaults of the settings for external targets. The HOST reads at most 8 MiB of an answer (idp-host
+// internal/mcpclient MaxResponse) and hands the model 16 KiB of a tool result (internal/harness ToolResultLimit), so a
+// plain answer of 1 MiB is already 64 times what the model reads and an eighth of what the HOST accepts; a stream
+// of 4 MiB is half of it, since the HOST reads a whole stream as one response. The memory a call holds is bounded
+// by the first number, so a hundred concurrent calls are a hundred MiB at the worst. Three failed probes at the
+// default interval of a minute block calls after about three minutes: a restart or a deploy of the upstream does
+// not block anything, an upstream that stays away or keeps answering nonsense does (ADR-0001 D51).
+const (
+	DefaultExternalMaxResult     = 1 << 20
+	DefaultExternalMaxStream     = 4 << 20
+	DefaultExternalProbeFailures = 3
+)
 
 // Target health as last checked against the pinned catalog.
 const (
@@ -73,6 +96,15 @@ type TargetStatus struct {
 	LiveDigest string    `json:"liveDigest,omitempty"`
 	CheckedAt  time.Time `json:"checkedAt,omitzero"`
 	Detail     string    `json:"detail,omitempty"`
+	// Failures counts the consecutive probes that failed (unreachable, or an answer that is not a catalog); it is
+	// reset by a probe that found the approved catalog. Blocked says calls to the target are refused now, and
+	// External that the target is of class external, whose calls are also blocked while it has not been verified
+	// or after ExternalProbeFailures failures (ADR-0001 D51 f). verified: some probe of this release found the
+	// approved catalog.
+	Failures int  `json:"failures,omitempty"`
+	Blocked  bool `json:"blocked,omitempty"`
+	External bool `json:"external,omitempty"`
+	verified bool
 }
 
 // Status is what the gateway attests about itself (ADR-0001 D4).
@@ -102,7 +134,10 @@ type state struct {
 	router   *routing.Router
 	args     *policy.ArgumentSchemas // pinned input schemas by exposed tool name
 	upstream *client.Client
-	loadedAt time.Time
+	// anonymous is the same connections without clientInfo and trace context: what the gateway uses toward targets of
+	// class external (ADR-0001 D51 b).
+	anonymous *client.Client
+	loadedAt  time.Time
 
 	resources map[string]*resourceIndex // pinned resource URIs and templates per target
 
@@ -186,6 +221,15 @@ func New(cfg Config) *Gateway {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
+	if cfg.ExternalMaxResult <= 0 {
+		cfg.ExternalMaxResult = DefaultExternalMaxResult
+	}
+	if cfg.ExternalMaxStream <= 0 {
+		cfg.ExternalMaxStream = DefaultExternalMaxStream
+	}
+	if cfg.ExternalProbeFailures <= 0 {
+		cfg.ExternalProbeFailures = DefaultExternalProbeFailures
+	}
 	if cfg.Recorder == nil {
 		cfg.Recorder = discard{}
 	}
@@ -228,6 +272,21 @@ func New(cfg Config) *Gateway {
 					v = 1
 				}
 				out = append(out, observability.LabeledValue{Labels: []string{t.Name, t.Status}, Value: v})
+			}
+			return out
+		})
+	g.metrics.GaugeFunc("idp_mcp_gateway_target_blocked", "1 while calls to the target are refused: drift, or for an external target also an unverified or unreachable catalog.", []string{"target", "class"},
+		func() []observability.LabeledValue {
+			var out []observability.LabeledValue
+			for _, t := range g.Status().Targets {
+				v, class := 0.0, "internal"
+				if t.Blocked {
+					v = 1
+				}
+				if t.External {
+					class = "external"
+				}
+				out = append(out, observability.LabeledValue{Labels: []string{t.Name, class}, Value: v})
 			}
 			return out
 		})
@@ -280,6 +339,9 @@ func (g *Gateway) activate(env *release.Envelope) error {
 	}
 	hosts := map[string]string{}
 	for _, t := range doc.Targets {
+		if g.cfg.Bridges.Matches(t.Endpoint) && !t.External() {
+			return fmt.Errorf("release %s: target %s is at a bridge address and is not of class external", doc.ReleaseID, t.Name)
+		}
 		u, _ := url.Parse(t.Endpoint)
 		hosts[u.Hostname()] = t.Network
 		if t.Network == release.NetworkLoopback && !g.cfg.DevMode {
@@ -307,8 +369,9 @@ func (g *Gateway) activate(env *release.Envelope) error {
 	st := &state{env: env, doc: doc, auth: auth, policy: authorization.Compile(doc, g.cfg.Clients), router: routing.New(doc), args: args, resources: resources,
 		upstream: &client.Client{HTTP: client.NewHTTPClient(policy.ForTargets(hosts, g.cfg.DevMode), g.cfg.CallTimeout, g.cfg.UpstreamTLS), Info: g.cfg.Info},
 		loadedAt: time.Now().UTC(), targets: map[string]TargetStatus{}}
+	st.anonymous = st.upstream.Anonymized()
 	for _, t := range doc.Targets {
-		st.targets[t.Name] = TargetStatus{Name: t.Name, Status: TargetPending}
+		st.targets[t.Name] = TargetStatus{Name: t.Name, Status: TargetPending, External: t.External()}
 	}
 	old := g.cur.Swap(st)
 	if old != nil {
@@ -345,6 +408,7 @@ func (g *Gateway) Status() Status {
 	s.Checked = true
 	st.mu.Lock()
 	for _, ts := range st.targets {
+		ts.Blocked = g.blockReason(st, ts) != ""
 		s.Targets = append(s.Targets, ts)
 		if ts.Status == TargetPending {
 			s.Checked = false
@@ -372,20 +436,36 @@ func (g *Gateway) RunDriftChecks(ctx context.Context) {
 	}
 }
 
-// CheckDrift compares every target's live catalog with the pinned snapshot (ADR-0001 D3).
+// CheckDrift compares every target's live catalog with the pinned snapshot (ADR-0001 D3). The probe of a target of
+// class external is anonymous, and its failures are counted (D51 f).
 func (g *Gateway) CheckDrift(ctx context.Context, st *state) {
 	for _, t := range st.doc.Targets {
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		ts := checkTarget(cctx, st.upstream, t)
+		c := st.upstream
+		if t.External() {
+			c = st.anonymous
+		}
+		ts := checkTarget(cctx, c, t)
 		cancel()
 		prev := st.target(t.Name)
+		ts.External = t.External()
+		switch ts.Status {
+		case TargetOK:
+			ts.verified = true
+		case TargetDrifted:
+			// a catalog that differs is blocked at once; once it is back the next probe verifies it again
+			ts.Failures = 0
+		default:
+			ts.Failures, ts.verified = prev.Failures+1, prev.verified
+		}
 		st.setTarget(ts)
-		if ts.Status != prev.Status {
+		blocked := g.blockReason(st, ts) != ""
+		if ts.Status != prev.Status || blocked != (g.blockReason(st, prev) != "") {
 			level := slog.LevelInfo
 			if ts.Status != TargetOK {
 				level = slog.LevelWarn
 			}
-			g.cfg.Log.Log(ctx, level, "target status", "target", t.Name, "status", ts.Status, "detail", ts.Detail)
+			g.cfg.Log.Log(ctx, level, "target status", "target", t.Name, "status", ts.Status, "detail", ts.Detail, "failures", ts.Failures, "blocked", blocked)
 		}
 	}
 }
@@ -433,7 +513,45 @@ func checkTarget(ctx context.Context, c *client.Client, t release.Target) Target
 	return ts
 }
 
-// blocked reports whether calls to target are refused because of drift.
-func (st *state) blocked(target string) bool {
-	return st.doc.DriftAction == "block" && st.target(target).Status == TargetDrifted
+// blockReason says why calls to the target are refused, "" when they are not.
+//
+// Every target: a catalog that differs from the approved one blocks when the release's driftAction is block.
+// A target of class external is also blocked whatever the driftAction says, and by more (ADR-0001 D51 f): until a
+// probe of this release found its approved catalog, and when ExternalProbeFailures consecutive probes failed,
+// until one succeeds. Fewer failures than that, after the catalog was verified, do not block: a restart of the
+// upstream is not an incident.
+func (g *Gateway) blockReason(st *state, ts TargetStatus) string {
+	drifted := "the upstream catalog changed since approval"
+	if !ts.External {
+		if st.doc.DriftAction == "block" && ts.Status == TargetDrifted {
+			return drifted
+		}
+		return ""
+	}
+	switch {
+	case ts.Status == TargetDrifted:
+		return drifted
+	case ts.Status == TargetOK:
+		return ""
+	case ts.Status == TargetPending || !ts.verified:
+		return "the upstream catalog has not been checked against the approved one yet"
+	case ts.Failures >= g.cfg.ExternalProbeFailures:
+		return fmt.Sprintf("the upstream catalog could not be checked against the approved one in the last %d probes", ts.Failures)
+	}
+	return ""
+}
+
+// blocked reports why calls to target are refused, "" if they are not.
+func (g *Gateway) blocked(st *state, target string) string {
+	return g.blockReason(st, st.target(target))
+}
+
+// isExternal reports whether target is of class external.
+func (st *state) isExternal(target string) bool {
+	for _, t := range st.doc.Targets {
+		if t.Name == target {
+			return t.External()
+		}
+	}
+	return false
 }

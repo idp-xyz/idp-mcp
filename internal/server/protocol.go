@@ -25,6 +25,13 @@ const (
 	MetaServerInfo         = "io.modelcontextprotocol/serverInfo"
 )
 
+// MetaExternal is the gateway's own key in the _meta of a tool in tools/list: true on every tool of an upstream of
+// class external, absent on every other (ADR-0001 D51 h). The gateway sets it from the class pinned in the release and
+// never takes it from an upstream: an upstream's own copy of the key is overwritten or removed. A client that
+// treats tools of external servers differently (idp-host: they send the member's data outside the enterprise)
+// can trust it for that reason, which it could not trust an upstream's annotation for.
+const MetaExternal = "io.idp.telos/external"
+
 // HTTP headers of the 2026-07-28 Streamable HTTP transport.
 const (
 	HeaderProtocolVersion = "MCP-Protocol-Version"

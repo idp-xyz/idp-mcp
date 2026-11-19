@@ -337,3 +337,101 @@ M6、M7 改了转发路径（调用者转发与签名）之后，官方符合性
 | `azp` 不当作客户端读 | `TestTheClientOfATokenIsItsAzpAndATokenWithoutOneHasNone`、`TestATokenWithoutAClientIsNotListed`、`TestValidTokensRSAAndECWithRotation` |
 | 启动时不检查客户端文件 | `TestTheGatewayDoesNotStartWithoutTheClientsFile` |
 | 注册服务丢掉 `reason` 与 `bytes` | `TestControlPlaneToDataPlane`（集成测试） |
+
+## 15. X1：第三方的服务器（2026-11-19，契约 1.3.0）
+
+起因：平台打算接第三方的 MCP 服务。网关此前的前提是"上游都是我们写的"：它把客户端的 `_meta` 整个转发（`clientInfo`、自定义键、追踪号），身份模式 `forward` 会把成员的主体、租户、角色交给对方，对方的结果和它自己发起的请求原样交给客户端，探测失败不拦截，评审人只看得到工具名（平台 ADR `idp-mcp-external-interop` 的缺口 S4、S5、S6、S10；决策 D-X3、D-X4、D-X7 里涉及外部上游的部分）。本节是其中的步骤 X1。**不含**：桥（D-X1、D-X2：凭据、旧版本协议、公网出口）、HOST 读标记（D-X5，在 idp-host 里）、按上游各自的限流与熔断（S8，是桥的事）。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| D50 | **上游有类别**：`internal`（缺省，此前的全部行为）或 `external`（第三方的）。登记时写 `class`，之后不能改（没有修改接口；要改就重新登记，等于重新评审）；它进入 Release 的目标（`class: "external"`，`internal` 不写出，已有 Release 的摘要不变），所以由审批人批准，也由网关按钉住的值执行。**桥的地址**由设置 `IDP_BRIDGE_ENDPOINTS` 给出（主机、`主机:端口` 或 http(s) 地址前缀，逗号分隔，缺省为空；注册服务与网关各读一份）：登记在这些地址上的服务器必须是 `external`，否则登记被拒绝（400，错误信息写明原因）；重新发现时再查一次（设置可能是后来加的）；网关激活 Release 时也查，有指向桥地址的目标而不是 `external` 就拒绝激活。`external` 的目标 `identity` 必须是 `none`（登记时拒绝，Release 校验也拒绝），也不能带 `tasks`、`resources.subscribe`、`resources.listChanged` 能力（它们会让网关中继上游主动推来的内容；编译 Release 时从外部目标的能力里去掉，校验再拒绝一次）。评审用的接口显示类别（`GET /api/v1/servers`、`/servers/{id}` 的 `class`，目录视图见 D53） | 类别由我们判定，不由上游自述（平台 ADR 原则 2）；"漏标"是最容易发生的错误，所以桥的地址单独列出，让它成为登记失败而不是悄悄的缺省。类别进 Release 是为了让网关只信自己钉住的东西，而不是登记表里的现状。**否决的做法**：登记后可改类别（改类别应当和第一次登记一样被评审，而审批只发生在服务器上）；按主机名猜（"看起来像第三方"）；只在注册服务里查桥地址（网关是执行的一方，两头都查才是"忘了也不行"） |
+| D51-a | **身份**：对 `external` 的目标，调用者断言、`io.idp.telos/caller`、主体、租户、角色都不发，登记时的身份模式无关紧要。执行点是 `forward`：目标是 external 就走 `externalParams`，不调用 `stampCaller`，所以即使 Release 里写了 `forward`（校验会拒绝，但执行不依赖校验），也不会发出 | 第三方不该拿到这些 |
+| D51-b | **`_meta` 白名单与追踪**：发给 external 目标的 `_meta` 由网关从白名单**构造**，不是从客户端的清理出来，所以没人想到的键也不会被发出。白名单三个键：`io.modelcontextprotocol/protocolVersion`（2026-07-28 每个请求的信封，没有它上游无法应答；值是网关自己的）；`io.modelcontextprotocol/clientCapabilities`（信封的另一个必填键，**固定是空对象**：客户端的能力——采样、征询、扩展——正是上游用来向客户端要更多东西的依据，而网关不为 external 目标中继任何这类请求，所以不能说"客户端支持"）；`progressToken`（上游报告这次调用进度所用的令牌；不透明，字符串且不超过 128 字节，或整数，否则丢弃）。**不发**：`clientInfo`、`io.idp.telos/caller*`、`traceparent`/`tracestate` 与任何自定义键。顶层参数里 `inputResponses`、`requestState`、`task` 也去掉（external 目标没有理由返回需要它们的应答）。W3C 追踪头不发；目录探测（网关与注册服务发现时）也不带 `clientInfo` 与追踪头（`client.Anonymized`）。`Mcp-Param-*` 头照 D12 转发（对 external 同样适用，有测试），它由客户端提供、网关不知道哪些是工具声明的，所以仍受 16 个、名字 128 字节、值 1024 字节的上限 | 平台 ADR 的草案写"缺省只有进度令牌"；规范的信封是两个必填键，所以实际的白名单是三个。把 `clientCapabilities` 固定成空，比转发客户端的更保守，也让 D51-c 成立。**否决的做法**：转发客户端的能力（上游据此发采样请求）；给 external 目标发网关自己的 `clientInfo`（暴露网关的版本，没有用处，规范不要求） |
+| D51-c | **上游发起的请求**：2026-07-28 是无状态的，上游向客户端要东西有两种形式——流里的 JSON-RPC 请求（`sampling/createMessage`、`elicitation/create`、`roots/list`、`ping`），和 `resultType: "input_required"` 的结果（`inputRequests`）；还有客户端没要的 `resultType: "task"`。对 external 目标，网关**逐条判断**应答里的消息：这几种都不转发，调用以工具错误结束（"调用被网关结束：服务器向客户端发了一个请求……"），审计结果 `REVERSE_REQUEST_REFUSED`，`reason` 是网关自己的措辞（方法名只在固定的几个里取，上游编的不写进去）；客户端什么也看不到。进度通知只在令牌是客户端发的那个时转发，并且从数字重新构造（`progressToken`、`progress`、`total`），上游的 `message` 文字不转发；其他通知（日志等）丢弃 | 采样请求能让上游借客户端的模型读上下文，征询能向成员要口令。在无状态协议里网关没有回给上游的通道，所以"拒绝"就是结束这次调用并让客户端知道原因 |
+| D51-d | **结果有上限**：`IDP_GATEWAY_EXTERNAL_MAX_RESULT_BYTES`（缺省 1 MiB）限一次普通应答和流里的一个事件；`IDP_GATEWAY_EXTERNAL_MAX_STREAM_BYTES`（缺省 4 MiB）限一条流读到的全部字节，**注释行和保活行也算**；上限必须在 1 到 16 MiB 之间。超过时调用以工具错误结束（写明上限，叫客户端少要一些），审计结果 `RESULT_TOO_LARGE`（`reason` 写明哪个上限）。流是逐事件解析的，网关一次只持有一个事件，读到上限就不再读：内存与上游的输出多少无关，只与上限有关（一个没有尽头的流只占那一块缓冲，直到上限或调用时限 60 秒，先到者为准）。流没有发出过事件就出错时，客户端得到普通的 JSON 应答；已经发出过的，工具错误作为流的最后一个事件发出 | **数字的来源**：HOST 读一个应答最多 8 MiB（`idp-host/internal/mcpclient` 的 `MaxResponse`），再多就失败；它交给模型的工具结果是 16 KiB（`internal/harness` 的 `ToolResultLimit`）。普通应答取 1 MiB：是模型读到的 64 倍，是 HOST 上限的八分之一，所以网关每个并发调用最多多占 1 MiB；流取 4 MiB：HOST 把一条流整个读成一个应答，取一半留出事件格式的开销。**与内部目标的差别**：内部目标仍是 16 MiB 的缓冲上限、流不设上限（此前的行为） |
+| D51-e | **参数按钉住的 schema 校验**：此前就有（M3，`policy.ArgumentSchemas`）：每个目标、每次 `tools/call`，参数都按 Release 钉住的 `inputSchema` 校验，不合格的不转发。差别在**应答的形式**：内部目标仍是 JSON-RPC 错误（`-32602`，此前的行为）；external 目标改成**工具错误**（`isError: true`，文字是"工具 X 的参数无效：<位置: 关键字>；调用没有发出，请改正参数后再调"，不含参数的值），审计仍是 `INVALID_ARGUMENTS`。这回应缺口清单第 4 节"参数校验的错误应作为工具错误返回"：规范建议校验错误让模型自己纠正；协议错误是客户端自己的问题，HOST 不会把它交给模型。只对 external 改，是为了内部目标"与此前完全一致" | 恶意上游可以对探测返回批准的目录，对调用接受任何东西（D51-f 的局限），所以钉住的 schema 在网关一侧的校验才是真正拦住"多出的 `path`、`recipient`"的控制 |
+| D51-f | **漂移与探测失败，宁可多扣**。对 external 目标：目录与批准的不同（漂移）**不论 Release 的 `driftAction` 是 `block` 还是 `report`**，立刻拦截调用；探测失败（不可达、应答无效、返回错误）**连续 `IDP_GATEWAY_EXTERNAL_PROBE_FAILURES` 次（缺省 3）**后拦截，探测周期是 `IDP_DRIFT_INTERVAL`（缺省 60 秒，每次探测超时 15 秒），所以对方挂了之后约 3 分钟拦截；**这个 Release 里从没有一次探测找到批准的目录的目标，也拦截**（包括刚激活的瞬间）。解除：下一次探测找到批准的目录（失败计数清零）；没有手动旁路开关。可见性：网关的状态（心跳经注册服务的 `GET /api/v1/gateways/{id}` 的 `lastStatus.targets[]`）里每个目标有 `failures`、`blocked`、`external`，指标 `idp_mcp_gateway_target_blocked{target,class}`，目标状态变化的日志，被拦的调用在审计里是 `NOT_DELIVERED` 加原因。被拦截的调用得到 HTTP 503 的 JSON-RPC 错误（"……暂不可用：……"）。拦截对 `tools/call`、`prompts/get`、`resources/read`、`completion/complete` 都生效（`completion/complete` 此前不查漂移，只对 external 目标加上，内部目标不变） | 三次、一分钟的取值：一次部署或重启上游不会拦任何东西，持续不可用或持续返回无意义内容的会被拦。**局限**（平台 ADR 也写了）：对方可以只对探测返回批准过的目录、对真实调用做别的事，探测发现不了。所以真正的控制是 D51-e（参数按钉住的 schema 校验）和"结果一律不可信"（HOST 的不可信标记、D51-c、D51-d）；漂移检测只发现诚实的变更 |
+| D51-g | **`Mcp-Param-*`**：D12 起转发（SEP-2243），对 external 目标同样适用（`TestMcpParamHeadersAreForwardedToAnExternalTargetToo`）；它们由客户端提供、网关不知道哪些是工具声明的，所以只受 D12 的数量与长度上限，不能保证与参数一致 | 规范要求中间方转发 |
+| D51-h | **标记**：`tools/list` 里 external 目标的每个工具的 `_meta` 带 `"io.idp.telos/external": true`（`server.MetaExternal`），由网关在 `routing.Route.Listed` 按钉住的类别写入；上游自己发的这个键（不论值）被覆盖；内部目标的工具永远没有它，上游自己发了也被删掉；`_meta` 里别的键原样保留，钉住的定义不改。prompts 与 resources 不加标记（HOST 只处理工具） | 标记是网关知道的事，不是上游声称的事；HOST 信的是这个，不是上游的标注 |
+| D52 | **external 目标的一切都是"只许 HOST"**：`authorization.hostOnlyByRelease` 对 external 目标返回真（工具、prompts、资源），所以只有客户端文件里 `host: true` 的客户端能看到、调用它们；运维的 `hostOnlyExcept` 对**工具**照常有效（模式加理由，每次使用都进审计）。prompts 与 resources 没有例外机制：它们没有工具名可匹配，external 目标的 prompts 与资源永远只给 HOST | 成员确认、敏感级别上限、不可信标记都在 HOST 里，绕过 HOST 就绕过它们（C8）；"所有外部上游的工具缺省只许 HOST"是平台决策的选择点 4 |
+| D53 | **评审人看到的**：此前 `GET /api/v1/servers` 只返回工具名，评审人批准一个服务器时看不到描述和参数定义。新接口 `GET /api/v1/servers/{id}/catalog` 返回最新与已批准的两个快照，每个工具的**完整**定义（名字、标题、描述、输入与输出 schema、注解、其余字段，即将被钉住的那一份），prompts、资源、资源模板同样；`changes` 是最新对已批准的差异：每一项新增、删除或改变，改变的写明哪些 JSON 键不同（`description`、`inputSchema`、`annotations`……）；还没有已批准的快照时全是新增。**批准 external 服务器的请求必须带 `{"digest": "<看过的目录摘要>"}`**（内部服务器可选）：摘要与最新快照不同就拒绝（409），所以评审之后才发现的目录不会被没看过就批准。**描述的长度**：external 服务器的目录，发现时（描述是那时才知道的）检查每个工具的 `description`、`title`，以及输入、输出 schema 与注解里每一处 `description`、`title`，上限 `IDP_EXTERNAL_MAX_DESCRIPTION` 字节（注册服务的设置，缺省 1024，约 150 个词）；含控制字符或不可见字符（零宽、方向控制、Unicode 标签字符）的也拒绝；prompts 同样。超过时发现失败（422），写明工具名与位置。内部服务器不受影响 | 描述是对模型的指令，评审人没读过全文就没评审过；schema 里的 `description` 是同样的通道，所以一并限制；不可见字符是把指令藏起来不让人看见的办法。长度上限给攻击者的空间设了上界，也给评审人要读的东西设了上界 |
+
+**契约**：`idp.telos.mcp` 1.2.0 → **1.3.0**，只有向后兼容的新增：Release 的目标多一个可选的 `class`（`"external"`）；调用记录多两个结果（`RESULT_TOO_LARGE`、`REVERSE_REQUEST_REFUSED`）；注册服务的 API（`openapi.yaml` 1.3.0）：登记与服务器的 `class`，`GET /api/v1/servers/{id}/catalog`，批准的可选请求体，网关状态里目标的 `failures`、`blocked`、`external`。迁移 `0009_server_class.sql`。`idp-contracts/idp.telos.mcp/1.3.0` 的发布副本要与 `api/contracts/` 逐字节相同（在那个仓库里放，不在这里）。
+
+**对内部目标的影响**：没有（以下是全部例外）：①目标状态里多了 `failures`（探测失败计数）、`blocked` 两个字段，内部目标的 `blocked` 就是此前的"漂移且 `driftAction` 为 block"；②`tools/list` 里内部目标的工具如果上游自己带了 `io.idp.telos/external` 键，现在被删掉（此前原样转发）。每一条都有内部目标的回归测试（见验证）。
+
+**执行点**（`file:line`）：- 登记：`internal/registry/servers.go` 的 `RegisterServer`（类别、身份）与 `checkBridge`（桥地址，登记与发现各一次）；网关激活 `internal/gateway/gateway.go:342`；Release 校验 `internal/release/release.go:386-402`；编译去掉能力 `internal/registry/catalog.go:287`（`externalCapabilities`）。
+- D51-a、b：`internal/gateway/mcp.go:375-382`（`forward` 对 external 走 `externalParams`，不调 `stampCaller`）、`:412`（不发追踪头）；白名单 `internal/gateway/external.go:56`；探测不带 `clientInfo` 与追踪：`internal/gateway/gateway.go:446`（`CheckDrift`）、`internal/client/client.go`（`Anonymized`）、注册服务发现 `internal/registry/servers.go:231`。
+- D51-c、d：`internal/gateway/mcp.go:427` 转入 `relayExternal`（`internal/gateway/external.go:204`）；逐条判断 `classify`（`:126`）；进度 `progressMessage`（`:168`）；普通应答上限 `:217`，流总量 `:279`，一行 `:282`，一个事件的数据 `:300`。
+- D51-e：`internal/gateway/mcp.go:321-335`（校验此前就在，external 改为工具错误）。
+- D51-f：`internal/gateway/gateway.go:441`（`CheckDrift` 计数）、`:523`（`blockReason`）；调用点 `internal/gateway/mcp.go:348`（`refuseBlocked`，`tools/call`、`prompts/get`、`resources/read`、`completion/complete`）。
+- D51-h：`internal/routing/routing.go:90`（`Route.Listed`）。
+- D52：`internal/authorization/authorization.go:60`（`hostOnlyByRelease`）。
+- D53：`internal/registry/catalog.go:89`（`GetCatalog`）、`:214`（`CheckExternalDescriptions`）；`internal/registry/servers.go:329`（`ApproveServer` 的摘要）。
+
+**升级说明**：
+1. **先升级注册服务（迁移 `0009`），再升级网关，最后登记第一台 external 服务器。** 网关心跳里新的 `failures`、`blocked`、`external` 字段，旧的注册服务（按 `DisallowUnknownFields` 解码）会拒绝（只在有探测失败或有 external 目标时才出现，但不要靠这个）；旧的网关遇到带 `class` 的 Release 会因未知字段拒绝激活（部署失败并自动回到上一个 GOOD），所以 external 服务器要在所有网关升级之后再登记。
+2. 在桥上线之前不用设 `IDP_BRIDGE_ENDPOINTS`；桥上线时在注册服务与网关里设成同一个值。
+
+**没有做的**：
+- **桥**（D-X1、D-X2）：凭据的引用与保管、旧版本协议、公网出口与地址规则、第三方地址形式（不以 `/mcp` 结尾）。本节只做网关里对"外部"这一类上游的强制；没有桥，现在也没有任何方式让网关连到公网上的第三方服务。
+- **按上游各自的限流、并发上限与熔断**（S8）：是桥的事（对第三方服务的出口在桥上）。网关侧只有 D49 的按客户端、按成员的限流。
+- **HOST 读标记**（D-X5）：idp-host 的下一个任务；标记的形式见 D51-h 与本仓库的报告。
+- **旧版本协议**与**凭据**：不在网关核心里（原则 1）。
+- **漂移检测的局限**：见 D51-f；一个上游可以诚实地回答探测、对调用另做别的事。所以真正的控制是 D51-e 和"结果一律不可信"（HOST 的不可信标记、D51-c、D51-d），不是探测。
+- external 目标的 `tasks` 与资源订阅（D50）：不支持，需要时另行设计。
+- 描述与 schema 文字的**语义**检查（"这段话像不像指令"）：不做；只限长度和不可见字符，其余靠评审人读。
+- 目录视图只在注册服务的接口里，没有网页界面。
+- external 目标的 prompts 与 resources 的标记，以及对它们的参数校验。
+- 登记时（而不是发现时）的描述长度检查：登记时还不知道描述。
+
+**验证**（2026-11-19，WSL）：
+- 测试用的恶意上游 `tests/fixtures/hostileserver`：记录收到的一切（头和正文），可以在描述里放指令、批准后改目录（描述、schema、新工具）、对探测返回批准的目录而对调用接受任何东西、返回超大结果与没有尽头的流（注释行、一行不换行、一个事件由很多短行组成）、发采样与征询请求（流里的、整个应答的、`input_required`）、自己发标记、慢、不可达、探测返回 503、垃圾或错误。
+- 网关的测试（`internal/gateway/external_test.go`）：上游收到的内容里没有主体、租户、角色、客户端信息、追踪号、自定义 `_meta` 键，探测也一样；内部目标仍然收到（回归）；不合格的参数不转发，external 是工具错误、内部仍是协议错误（回归）；超大结果与无尽的流被截断并写审计，网关停止读取，堆没有随上游的输出增长，内部目标的同样大小的结果完整通过（回归）；反向请求被拒绝并写审计，客户端什么也看不到，内部目标仍然中继（回归）；漂移（描述、schema、新工具；`driftAction` 的 block 与 report 两种）拦截并在改回后恢复，内部目标仍只在 block 时拦截且审计记录没有多出 `reason`（回归）；探测失败（不可达、无效应答、错误应答）在阈值后拦截、状态里看得到、一次成功的探测解除，内部目标不被拦（回归）；从没核对过的目标被拦；标记（上游自带、写反了、与自己的键并存）；只有 HOST 客户端看得到、调得到，运维的例外有理由并进审计；桥地址；`Mcp-Param-*`。
+- 注册服务与 Release 的测试：类别的往返与摘要不变，桥地址的匹配，描述限制，差异。集成测试（`tests/integration/external_test.go`，真实 PostgreSQL）：登记规则、发现时的描述限制、评审视图、批准必须带摘要、Release 钉住类别并去掉 tasks 能力、网关里只有 HOST 的客户端看得到并带标记、超大结果的审计经注册服务存下、漂移后的拦截在注册服务的网关状态里看得到、新目录的差异显示改变的描述。
+- `make test`（含 `-race`、gofmt、vet）与 `make test-integration` 通过；官方符合性 37/37 个计分场景通过，tasks 扩展 8/8（参考服务器用的是主检出里已构建的那份，只读）。
+
+**反向验证**：每个控制手工去掉一次，对应的测试失败，再恢复（共 39 项；第一次去掉时有五项没有测试失败或没能编译，补了测试后重做）：
+
+| 去掉的控制 | 失败的测试 |
+|---|---|
+| D52 hostOnlyByRelease | `TestEverythingOfAnExternalTargetIsHostOnlyBecauseOfItsClassAndNothingElseIs`、`TestOnlyTheHostClientSeesAnExternalTargetsToolsUnlessTheOperatorSaysOtherwise` |
+| D51a identity for external (stampCaller used) | `TestProgressIsRelayedForTheCallsOwnTokenAsNumbersOnly`、`TestTheExternalClassForcesNoIdentityEvenWhenTheTargetSaysForward`、`TestTheExternalUpstreamReceivesNoIdentityNoClientInfoNoTraceAndNoCustomMeta` |
+| D51b _meta allow-list (client _meta kept) | `TestTheExternalClassForcesNoIdentityEvenWhenTheTargetSaysForward`、`TestTheExternalUpstreamReceivesNoIdentityNoClientInfoNoTraceAndNoCustomMeta` |
+| D51b clientCapabilities forwarded as sent | `TestTheExternalClassForcesNoIdentityEvenWhenTheTargetSaysForward`、`TestTheExternalUpstreamReceivesNoIdentityNoClientInfoNoTraceAndNoCustomMeta` |
+| D51b trace headers sent | `TestTheExternalUpstreamReceivesNoIdentityNoClientInfoNoTraceAndNoCustomMeta` |
+| D51b probe carries clientInfo and trace | `TestTheExternalUpstreamReceivesNoIdentityNoClientInfoNoTraceAndNoCustomMeta`、`TestTheProbeOfAnExternalTargetCarriesNoClientInfoAndNoTrace` |
+| D51b registry discovery carries clientInfo | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted` |
+| D51 e arguments not validated for external (tool error removed) | `TestExternalArgumentsThatDoNotMatchThePinnedSchemaAreNotForwardedAndTheModelGetsAToolError` |
+| D51 e arguments not validated at all | `TestArgumentsAreValidatedBeforeDelivery`、`TestExternalArgumentsThatDoNotMatchThePinnedSchemaAreNotForwardedAndTheModelGetsAToolError`、`TestInternalArgumentsThatDoNotMatchAreStillAProtocolError` |
+| D51 c input_required result accepted | `TestRequestsFromTheExternalServerAreRefusedAuditedAndNeverReachTheClient` |
+| D51 d plain result limit | `TestAnOversizedPlainResultIsCutWithAToolErrorAndAnAuditRecord` |
+| D51 d stream total limit | `TestAStreamThatNeverEndsIsCutAtTheTotalAndTheGatewayStopsReading` |
+| D51 f drift blocks only per driftAction (external) | `TestADriftedExternalCatalogBlocksCallsWhateverTheDriftActionSaysAndRecovers` |
+| D51 f failed probes never block | `TestProbeFailuresBlockAnExternalTargetAfterTheThresholdAndASuccessfulProbeClearsIt` |
+| D51 f unverified/pending target not blocked | `TestAnExternalTargetThatWasNeverVerifiedIsBlockedUntilItIs` |
+| D51 f block at threshold 1 (counts wrongly: never clears) | `TestProbeFailuresBlockAnExternalTargetAfterTheThresholdAndASuccessfulProbeClearsIt` |
+| D51 f completion not blocked for external | `TestCompletionOfABlockedExternalTargetIsRefusedToo` |
+| D51 h marker set for external | `TestTheExternalMarkerIsTheGatewaysAloneForAnyUpstream`、`TestTheMarkerIsSetForEveryToolOfAnExternalTargetAndNeverForAnInternalOne` |
+| D51 h upstream's own marker kept for internal | `TestTheExternalMarkerIsTheGatewaysAloneForAnyUpstream`、`TestTheMarkerIsSetForEveryToolOfAnExternalTargetAndNeverForAnInternalOne` |
+| D51 h upstream's own marker value kept for external | `TestTheExternalMarkerIsTheGatewaysAloneForAnyUpstream`、`TestTheMarkerIsSetForEveryToolOfAnExternalTargetAndNeverForAnInternalOne` |
+| D50 gateway refuses an internal target at a bridge address | `TestAReleaseWithAnInternalTargetAtABridgeAddressIsRefusedAtActivation` |
+| D50 release refuses external with identity | `TestTheReleaseRefusesAnExternalTargetWithIdentityOrRelayedCapabilities` |
+| D50 release refuses external with tasks/subscribe | `TestTheReleaseRefusesAnExternalTargetWithIdentityOrRelayedCapabilities` |
+| D50 registry: class required at a bridge address | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted` |
+| D50 registry: external with identity forward | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted` |
+| D53 registry: description limit | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted`、`TestTheDescriptionsOfAnExternalCatalogAreBoundedAndHaveNoInvisibleText` |
+| D53 registry: schema descriptions not checked | `TestTheDescriptionsOfAnExternalCatalogAreBoundedAndHaveNoInvisibleText` |
+| D53 registry: approval of external needs the digest | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted` |
+| D53 registry: stale digest refused | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted` |
+| D53 registry: catalog shows full tools (annotations dropped) | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted` |
+| D51 g Mcp-Param headers forwarded | `TestMcpParamHeadersAreForwardedToAnExternalTargetToo`、`TestToolsCallIsRoutedUnderTheNativeName` |
+| D51 c reverse request in stream relayed | `TestRequestsFromTheExternalServerAreRefusedAuditedAndNeverReachTheClient` |
+| D51 c reverse request / input_required as whole answer relayed | `TestRequestsFromTheExternalServerAreRefusedAuditedAndNeverReachTheClient` |
+| D51 d event/line limit | `TestTheLimitOfOneEventHoldsWhateverShapeTheEventHas` |
+| D51 d event data limit | `TestTheLimitOfOneEventHoldsWhateverShapeTheEventHas` |
+| D51 c foreign progress tokens relayed | `TestProgressIsRelayedForTheCallsOwnTokenAsNumbersOnly` |
+| D50 compile keeps tasks/subscribe capabilities | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted` |
+| D53 registry: invisible characters | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted`、`TestTheDescriptionsOfAnExternalCatalogAreBoundedAndHaveNoInvisibleText` |
+| D53 registry: diff reports changes | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted`、`TestTheDiffOfTwoCatalogsNamesWhatChanged` |
+

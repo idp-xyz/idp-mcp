@@ -318,14 +318,17 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 	if dec.Exception != "" {
 		rec.reason("host-only exception: " + dec.Exception)
 	}
-	if st.blocked(rt.Target) {
-		rec.done(rt.Target, invocation.Allow, invocation.OutcomeNotDelivered)
-		transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError,
-			Message: "Tool temporarily unavailable: the upstream catalog changed since approval"})
+	if g.refuseBlocked(w, st, req, rec, rt.Target, "Tool") {
 		return
 	}
 	if err := st.args.Validate(p.Name, p.Arguments); err != nil {
 		rec.done(rt.Target, invocation.Deny, invocation.OutcomeInvalidArgs)
+		if st.isExternal(rt.Target) {
+			// a tool error, not a protocol error: the model reads it and can correct its arguments (ADR-0001 D51 e)
+			rec.reason("the arguments do not match the pinned input schema")
+			transport.WriteJSON(w, http.StatusOK, g.toolErrorResult(req.ID, "Invalid arguments for tool "+p.Name+": "+err.Error()+". The call was not sent; correct the arguments and call again."))
+			return
+		}
 		transport.WriteError(w, http.StatusOK, req.ID, &server.Error{Code: server.CodeInvalidParams, Message: "Invalid arguments for tool " + p.Name,
 			Data: map[string]string{"reason": err.Error()}})
 		return
@@ -337,6 +340,23 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 		observe = func(msg json.RawMessage) { g.tasks.bindFromResult(msg, rt.Target, p.Name, pr) }
 	}
 	rec.done(rt.Target, invocation.Allow, g.forward(w, r, st, req, rt.Endpoint, rt.Tool.Name, params, rec.to(rt.Target), observe))
+}
+
+// refuseBlocked answers, and records, a request to a target whose calls are blocked (drift; for an external target
+// also an unverified or unreachable catalog, ADR-0001 D51 f). kind is "Tool", "Prompt" or "Resource". The audit
+// reason is set for external targets only, so that the record of an internal target is what it was.
+func (g *Gateway) refuseBlocked(w http.ResponseWriter, st *state, req *server.Request, rec *callRecord, target, kind string) bool {
+	why := g.blocked(st, target)
+	if why == "" {
+		return false
+	}
+	if st.isExternal(target) {
+		rec.reason(why)
+	}
+	rec.done(target, invocation.Allow, invocation.OutcomeNotDelivered)
+	transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError,
+		Message: kind + " temporarily unavailable: " + why})
+	return true
 }
 
 // forward sends the request to the upstream with the given (possibly rewritten) params and relays
@@ -352,7 +372,17 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 	}
 	// the caller key is the gateway's: a client's own is removed; a target approved for identity gets the verified one
 	caller, known := principalFrom(r.Context())
-	params, err := stampCaller(params, identityOf(st.doc, endpoint), caller, known, g.cfg.CallerSigner, endpoint, req.Method)
+	tgt := targetByEndpoint(st.doc, endpoint)
+	external := tgt != nil && tgt.External()
+	var progress json.RawMessage
+	var err error
+	if external {
+		// a target of class external is sent no identity whatever its identity mode says, and a _meta made of the
+		// allow-list alone (ADR-0001 D51 a, b); stampCaller is not even called
+		params, progress = externalParams(params)
+	} else {
+		params, err = stampCaller(params, identityOf(st.doc, endpoint), caller, known, g.cfg.CallerSigner, endpoint, req.Method)
+	}
 	if err != nil { // the signing key failed: send nothing rather than an identity the upstream cannot check
 		g.cfg.Log.Error("caller assertion", "err", err)
 		g.upstreamError(w, req.ID, http.StatusBadGateway, "Upstream unavailable; the call was not delivered", invocation.OutcomeNotDelivered)
@@ -379,7 +409,9 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 	for k, vs := range extra {
 		up.Header[k] = vs
 	}
-	observability.Propagator.Inject(ctx, propagation.HeaderCarrier(up.Header))
+	if !external { // an external server is not told which trace the call belongs to
+		observability.Propagator.Inject(ctx, propagation.HeaderCarrier(up.Header))
+	}
 	resp, err := st.upstream.HTTP.Do(up)
 	if err != nil {
 		var op *net.OpError
@@ -391,6 +423,9 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 		return invocation.OutcomeUnknown
 	}
 	defer resp.Body.Close()
+	if external {
+		return g.relayExternal(w, req, resp, rec, progress)
+	}
 	switch transport.MediaType(resp.Header.Get("Content-Type")) {
 	case "application/json":
 		raw, err := transport.ReadBounded(resp.Body, MaxUpstreamJSON)

@@ -52,10 +52,12 @@ type Policy struct {
 	hostOnlyTarget map[string]bool
 }
 
-// hostOnlyByRelease reports whether the release makes everything of a target host-only. No release field
-// says so yet: this is where the class of an upstream will, when the gateway knows external upstreams
-// (the interop decision's step X1), so that their tools are host-only without the operator listing them.
-func hostOnlyByRelease(release.Target) bool { return false }
+// hostOnlyByRelease reports whether the release makes everything of a target host-only: the tools, prompts and
+// resources of an external target are (ADR-0001 D52). What an external server returns is untrusted, and the
+// controls for that (the member's confirmation, the sensitivity ceiling, the untrusted marking) are in the
+// HOST, so a client that does not pass through the HOST must not reach it unless the operator's hostOnlyExcept
+// says so for a pattern, with a reason that is audited at each use.
+func hostOnlyByRelease(t release.Target) bool { return t.External() }
 
 // Compile builds a policy from a release document and the clients file. A nil clients lists nobody: the
 // policy then grants nothing, whatever the roles (fail closed).

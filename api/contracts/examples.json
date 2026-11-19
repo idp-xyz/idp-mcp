@@ -1,5 +1,5 @@
 {
-  "description": "idp.telos.mcp 1.2.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
+  "description": "idp.telos.mcp 1.3.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
   "generatedBy": "go test ./internal/release -run TestContract -update",
   "examples": [
     {
@@ -232,6 +232,81 @@
         ],
         "tenantId": "acme",
         "toolNaming": "native"
+      }
+    },
+    {
+      "definition": "Release",
+      "value": {
+        "approvedBy": "bob",
+        "auth": {
+          "apiKeys": [
+            {
+              "id": "k-agent-1",
+              "roles": [
+                "operator"
+              ],
+              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+              "subject": "svc-agent"
+            }
+          ],
+          "mode": "api-key"
+        },
+        "createdAt": "2026-11-19T08:00:00Z",
+        "createdBy": "alice",
+        "driftAction": "block",
+        "gatewayId": "gw-edge-1",
+        "grants": [
+          {
+            "roles": [
+              "operator"
+            ],
+            "target": "registry-partner",
+            "tools": [
+              "lookup_company"
+            ]
+          }
+        ],
+        "releaseId": "rel-2026-11-19-001",
+        "schemaVersion": "idp.mcp.release/v1",
+        "targets": [
+          {
+            "capabilities": [
+              "tools"
+            ],
+            "class": "external",
+            "endpoint": "https://bridge.idp.svc:8443/connections/registry-partner/mcp",
+            "name": "registry-partner",
+            "network": "private",
+            "prompts": [],
+            "serverId": "srv-partner",
+            "snapshotDigest": "sha256:fca7466a784871887001e380e6e69210c44a4fbe3edcf2c3403ec902695f9b01",
+            "tools": [
+              {
+                "annotations": {
+                  "openWorldHint": true,
+                  "readOnlyHint": true
+                },
+                "description": "Looks a company up in the register by name.",
+                "inputSchema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "maxLength": 200,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "name": "lookup_company"
+              }
+            ]
+          }
+        ],
+        "tenantId": "acme",
+        "toolNaming": "prefixed"
       }
     },
     {
@@ -545,6 +620,41 @@
         "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
         "subject": "alice",
         "tool": "*"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:08Z",
+        "authMethod": "jwt",
+        "bytes": 4194304,
+        "client": "idp-host",
+        "decision": "ALLOW",
+        "latencyMs": 900,
+        "method": "tools/call",
+        "outcome": "RESULT_TOO_LARGE",
+        "reason": "the server's stream is longer than the limit of 4194304 bytes",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "alice",
+        "target": "registry-partner",
+        "tool": "registry-partner__lookup_company"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:09Z",
+        "authMethod": "jwt",
+        "client": "idp-host",
+        "decision": "ALLOW",
+        "latencyMs": 80,
+        "method": "tools/call",
+        "outcome": "REVERSE_REQUEST_REFUSED",
+        "reason": "the server sent the client a request (sampling/createMessage); a server of class external may not ask the client for anything",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "alice",
+        "target": "registry-partner",
+        "tool": "registry-partner__lookup_company"
       }
     },
     {

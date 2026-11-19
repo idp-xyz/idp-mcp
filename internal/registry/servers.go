@@ -33,6 +33,24 @@ type Service struct {
 	// attestation (default 30s); instances silent for a day are forgotten.
 	StaleAfter time.Duration
 	Log        *slog.Logger
+	// Bridges are the addresses of the bridge endpoints: a server registered at one must be of class external
+	// (ADR-0001 D50). MaxExternalDescription bounds, in bytes, every description of an external server's catalog
+	// (D51); zero means DefaultMaxExternalDescription.
+	Bridges                policy.Endpoints
+	MaxExternalDescription int
+}
+
+// DefaultMaxExternalDescription is the longest description, in bytes, an external server's tool may have, and the
+// longest description or title inside its input schema. The descriptions of well-written tools are a sentence or
+// two; the room a description leaves for instructions to the model is the room an attacker has, and the reviewer
+// has to read all of it. 1 KiB is about 150 words, a quarter of what NormalizeTools accepts for a server of ours.
+const DefaultMaxExternalDescription = 1024
+
+func (s *Service) maxDescription() int {
+	if s.MaxExternalDescription > 0 {
+		return s.MaxExternalDescription
+	}
+	return DefaultMaxExternalDescription
 }
 
 func (s *Service) staleAfter() time.Duration {
@@ -44,7 +62,7 @@ func (s *Service) staleAfter() time.Duration {
 
 var roleRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
 
-const serverColumns = `s.id::text, s.target_name, s.display_name, s.endpoint, s.network, s.identity, s.lifecycle,
+const serverColumns = `s.id::text, s.target_name, s.display_name, s.endpoint, s.network, s.identity, s.class, s.lifecycle,
   s.snapshot_id::text, s.approved_snapshot_id::text, ls.digest, aps.digest,
   coalesce((SELECT array_agg(t->>'name' ORDER BY t->>'name') FROM jsonb_array_elements(ls.tools::jsonb) t), '{}'),
   coalesce((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(coalesce(ls.discovery->'capabilities', '{}'::jsonb)) k
@@ -54,7 +72,7 @@ FROM servers s LEFT JOIN snapshots ls ON ls.id = s.snapshot_id LEFT JOIN snapsho
 
 func scanServer(row pgx.Row) (*Server, error) {
 	var s Server
-	err := row.Scan(&s.ID, &s.TargetName, &s.DisplayName, &s.Endpoint, &s.Network, &s.Identity, &s.Lifecycle, &s.SnapshotID,
+	err := row.Scan(&s.ID, &s.TargetName, &s.DisplayName, &s.Endpoint, &s.Network, &s.Identity, &s.Class, &s.Lifecycle, &s.SnapshotID,
 		&s.ApprovedSnapshotID, &s.SnapshotDigest, &s.ApprovedDigest, &s.ToolNames, &s.Capabilities, &s.CreatedBy, &s.ApprovedBy, &s.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
@@ -86,6 +104,11 @@ type RegisterInput struct {
 	// then knows who is asking); the default "none" passes nothing. It is fixed at registration and reviewed
 	// with the release.
 	Identity string `json:"identity,omitempty"`
+	// Class "external" marks a third party's server (ADR-0001 D50): the gateway forwards it no identity, a short
+	// allow-list of _meta, takes no request from it, bounds its results, and marks its tools; "internal" (the
+	// default) is today's behaviour. Fixed at registration, reviewed and pinned in the release: to change it,
+	// register the server again. A server at a bridge address must be external.
+	Class string `json:"class,omitempty"`
 }
 
 // RegisterServer adds a DRAFT server after the endpoint passed the upstream policy.
@@ -106,21 +129,33 @@ func (s *Service) RegisterServer(ctx context.Context, p Principal, in RegisterIn
 	if in.Identity != release.IdentityNone && in.Identity != release.IdentityForward {
 		return nil, fail(http.StatusBadRequest, "identity must be none or forward")
 	}
+	if in.Class == "" {
+		in.Class = release.ClassInternal
+	}
+	if in.Class != release.ClassInternal && in.Class != release.ClassExternal {
+		return nil, fail(http.StatusBadRequest, "class must be internal or external")
+	}
+	if in.Class == release.ClassExternal && in.Identity != release.IdentityNone {
+		return nil, fail(http.StatusBadRequest, "a server of class external cannot be sent the caller's identity: identity must be none")
+	}
 	u, err := s.Policy.CheckEndpoint(ctx, in.Endpoint)
 	if err != nil {
 		return nil, fail(http.StatusBadRequest, "%s", err.Error())
 	}
+	if err := s.checkBridge(u.String(), in.Class); err != nil {
+		return nil, err
+	}
 	id := NewID()
 	var out *Server
 	err = s.Store.InTenant(ctx, p.Tenant, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO servers (id, tenant_id, target_name, display_name, endpoint, network, identity, lifecycle, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 'DRAFT', $8)`, id, p.Tenant, in.TargetName, in.DisplayName, u.String(), s.Policy.NetworkOf(u), in.Identity, p.Subject); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO servers (id, tenant_id, target_name, display_name, endpoint, network, identity, class, lifecycle, created_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'DRAFT', $9)`, id, p.Tenant, in.TargetName, in.DisplayName, u.String(), s.Policy.NetworkOf(u), in.Identity, in.Class, p.Subject); err != nil {
 			if strings.Contains(err.Error(), "duplicate key") {
 				return fail(http.StatusConflict, "a server with this targetName or endpoint is already registered")
 			}
 			return err
 		}
-		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.register", id, map[string]string{"endpoint": client.Redact(u.String()), "targetName": in.TargetName, "identity": in.Identity}); err != nil {
+		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.register", id, map[string]string{"endpoint": client.Redact(u.String()), "targetName": in.TargetName, "identity": in.Identity, "class": in.Class}); err != nil {
 			return err
 		}
 		var err error
@@ -128,6 +163,15 @@ func (s *Service) RegisterServer(ctx context.Context, p Principal, in RegisterIn
 		return err
 	})
 	return out, err
+}
+
+// checkBridge refuses a server of class internal at a bridge address, so that the class cannot be forgotten for the
+// one kind of upstream that is known to be external (ADR-0001 D50).
+func (s *Service) checkBridge(endpoint, class string) error {
+	if class != release.ClassExternal && s.Bridges.Matches(endpoint) {
+		return fail(http.StatusBadRequest, "this endpoint is at a bridge address, which serves third parties' servers: register it with class external")
+	}
+	return nil
 }
 
 // ListServers lists the tenant's servers.
@@ -177,13 +221,20 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 	if _, err := s.Policy.CheckEndpoint(ctx, sv.Endpoint); err != nil { // the policy may have tightened
 		return nil, fail(http.StatusConflict, "%s", err.Error())
 	}
+	if err := s.checkBridge(sv.Endpoint, sv.Class); err != nil { // the setting may have been added since the registration
+		return nil, fail(http.StatusConflict, "%s", err.Error())
+	}
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	disc, err := s.Upstream.Discover(dctx, sv.Endpoint)
+	up := s.Upstream
+	if sv.Class == release.ClassExternal {
+		up = up.Anonymized() // a third party is told neither which program asks nor which trace the request belongs to
+	}
+	disc, err := up.Discover(dctx, sv.Endpoint)
 	if err != nil {
 		return nil, fail(http.StatusBadGateway, "discovery failed: %s", err.Error())
 	}
-	raws, err := s.Upstream.ListTools(dctx, sv.Endpoint)
+	raws, err := up.ListTools(dctx, sv.Endpoint)
 	if err != nil {
 		return nil, fail(http.StatusBadGateway, "tools/list failed: %s", err.Error())
 	}
@@ -193,7 +244,7 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 	}
 	var prompts []server.Prompt
 	if _, ok := disc.Capabilities[release.CapPrompts]; ok {
-		praws, err := s.Upstream.ListPrompts(dctx, sv.Endpoint)
+		praws, err := up.ListPrompts(dctx, sv.Endpoint)
 		if err != nil {
 			return nil, fail(http.StatusBadGateway, "prompts/list failed: %s", err.Error())
 		}
@@ -204,14 +255,14 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 	var resources []server.Resource
 	var templates []server.ResourceTemplate
 	if _, ok := disc.Capabilities[release.CapResources]; ok {
-		rraws, err := s.Upstream.List(dctx, sv.Endpoint, "resources/list", "resources")
+		rraws, err := up.List(dctx, sv.Endpoint, "resources/list", "resources")
 		if err != nil {
 			return nil, fail(http.StatusBadGateway, "resources/list failed: %s", err.Error())
 		}
 		if resources, err = federation.NormalizeResources(rraws); err != nil {
 			return nil, fail(http.StatusUnprocessableEntity, "resource catalog refused: %s", err.Error())
 		}
-		traws, err := s.Upstream.List(dctx, sv.Endpoint, "resources/templates/list", "resourceTemplates")
+		traws, err := up.List(dctx, sv.Endpoint, "resources/templates/list", "resourceTemplates")
 		if err != nil {
 			return nil, fail(http.StatusBadGateway, "resources/templates/list failed: %s", err.Error())
 		}
@@ -221,6 +272,11 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 	}
 	if err := s.checkSchemas(tools); err != nil {
 		return nil, fail(http.StatusUnprocessableEntity, "catalog refused: %s", err.Error())
+	}
+	if sv.Class == release.ClassExternal {
+		if err := CheckExternalDescriptions(tools, prompts, s.maxDescription()); err != nil {
+			return nil, fail(http.StatusUnprocessableEntity, "catalog refused: %s", err.Error())
+		}
 	}
 	digest, _ := release.Catalog{Tools: tools, Prompts: prompts, Resources: resources, ResourceTemplates: templates}.Digest()
 	if resources == nil {
@@ -266,8 +322,11 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 	return out, err
 }
 
-// ApproveServer approves the latest snapshot (four-eyes).
-func (s *Service) ApproveServer(ctx context.Context, p Principal, id string) (*Server, error) {
+// ApproveServer approves the latest snapshot (four-eyes). digest is the catalog digest the reviewer read (see
+// GetCatalog): if given, it must be the latest snapshot's, so that a catalog discovered after the reviewer looked is
+// not approved unseen; for a server of class external it is required, because the descriptions of a third party's
+// tools are the one thing a reviewer must have read (ADR-0001 D53).
+func (s *Service) ApproveServer(ctx context.Context, p Principal, id, digest string) (*Server, error) {
 	if err := require(p, RoleReviewer); err != nil {
 		return nil, err
 	}
@@ -283,10 +342,16 @@ func (s *Service) ApproveServer(ctx context.Context, p Principal, id string) (*S
 		if err := fourEyes(p, sv.CreatedBy); err != nil {
 			return err
 		}
+		if sv.Class == release.ClassExternal && digest == "" {
+			return fail(http.StatusBadRequest, "approving a server of class external needs the digest of the catalog you reviewed: read it at GET /api/v1/servers/%s/catalog and send {\"digest\": ...}", id)
+		}
+		if digest != "" && digest != *sv.SnapshotDigest {
+			return fail(http.StatusConflict, "the latest catalog is not the one you reviewed (its digest is %s): read it again", *sv.SnapshotDigest)
+		}
 		if _, err := tx.Exec(ctx, `UPDATE servers SET lifecycle = 'APPROVED', approved_snapshot_id = snapshot_id, approved_by = $2, updated_at = now() WHERE id = $1`, id, p.Subject); err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.approve", id, map[string]any{"digest": *sv.SnapshotDigest}); err != nil {
+		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.approve", id, map[string]any{"digest": *sv.SnapshotDigest, "class": sv.Class}); err != nil {
 			return err
 		}
 		out, err = getServer(ctx, tx, id, false)

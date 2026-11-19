@@ -64,6 +64,10 @@ services:
       IDP_ADMIN_ISSUER: ${IDP_ADMIN_ISSUER:-idp-mcp-dev}
       IDP_ALLOWED_UPSTREAM_HOSTS: minimal,reference
       IDP_PRIVATE_UPSTREAM_HOSTS: minimal,reference
+      # servers of class external (ADR-0001 D50, D53): the bridge's address (a server there must be registered external;
+      # empty = none named) and the longest description of such a server's tools, in bytes
+      IDP_BRIDGE_ENDPOINTS: ${IDP_BRIDGE_ENDPOINTS:-}
+      IDP_EXTERNAL_MAX_DESCRIPTION: ${IDP_EXTERNAL_MAX_DESCRIPTION:-1024}
       # MODE=oidc: TLS everywhere (certificates issued by deploy/e2e.sh into .local/tls)
       IDP_TLS_CERT_FILE: ${IDP_REGISTRY_TLS_CERT:-}
       IDP_TLS_KEY_FILE: ${IDP_REGISTRY_TLS_KEY:-}
@@ -93,6 +97,12 @@ services:
       # the OAuth clients served, which is the HOST, the host-only tools, the rate limits: written by deploy/e2e.sh per
       # mode (the gateway does not start without it; ADR-0001 D46)
       IDP_GATEWAY_CLIENTS_FILE: /etc/idp/clients.yaml
+      # targets of class external (ADR-0001 D50, D51): the same bridge list as the registry's; the limits of an answer, of a
+      # stream, and the failed catalog probes that block calls (empty = the defaults 1 MiB, 4 MiB, 3)
+      IDP_BRIDGE_ENDPOINTS: ${IDP_BRIDGE_ENDPOINTS:-}
+      IDP_GATEWAY_EXTERNAL_MAX_RESULT_BYTES: ${IDP_GATEWAY_EXTERNAL_MAX_RESULT_BYTES:-}
+      IDP_GATEWAY_EXTERNAL_MAX_STREAM_BYTES: ${IDP_GATEWAY_EXTERNAL_MAX_STREAM_BYTES:-}
+      IDP_GATEWAY_EXTERNAL_PROBE_FAILURES: ${IDP_GATEWAY_EXTERNAL_PROBE_FAILURES:-}
     volumes: ['../.local/tls:/etc/idp/tls:ro', '../.local/gateway-clients.yaml:/etc/idp/clients.yaml:ro']
     depends_on: [registry, minimal, reference]
 

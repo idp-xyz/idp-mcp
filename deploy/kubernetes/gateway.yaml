@@ -33,6 +33,15 @@ data:
   # IDP_GATEWAY_CALLER_KEY_FILE: "/etc/idp/caller/caller.key"
   # The OAuth clients this gateway serves (ADR-0001 D46 to D49): the file below. The gateway does not start without it.
   IDP_GATEWAY_CLIENTS_FILE: "/etc/idp/clients/clients.yaml"
+  # Upstreams of class external (a third party's servers, ADR-0001 D50 and D51). The bridge addresses are the same list
+  # as the registry's (IDP_BRIDGE_ENDPOINTS there): a release with a target there that is not external is refused.
+  # The limits are the defaults, which are what the HOST accepts (idp-host reads 8 MiB at most and gives the model
+  # 16 KiB of a tool result): one answer or one event 1 MiB, one stream 4 MiB; three failed catalog probes (at
+  # IDP_DRIFT_INTERVAL) block calls to such a target until a probe succeeds.
+  IDP_BRIDGE_ENDPOINTS: ""
+  # IDP_GATEWAY_EXTERNAL_MAX_RESULT_BYTES: "1048576"
+  # IDP_GATEWAY_EXTERNAL_MAX_STREAM_BYTES: "4194304"
+  # IDP_GATEWAY_EXTERNAL_PROBE_FAILURES: "3"
   IDP_LOG_LEVEL: "info"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
 ---
