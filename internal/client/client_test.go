@@ -125,3 +125,19 @@ func TestRedact(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestHeadersEncodeANameThatCannotBeAPlainValue(t *testing.T) {
+	// a resource URI with non-ASCII characters, as the gateway sends it upstream (2026-07-28: Base64 form of Mcp-Name)
+	const uri = "file:///docs/café.txt"
+	h := Headers("resources/read", uri)
+	got := h.Get(server.HeaderName)
+	if got == uri || !strings.HasPrefix(got, "=?base64?") {
+		t.Fatalf("Mcp-Name %q was sent as it is", got)
+	}
+	if back, ok := server.DecodeHeaderValue(got); !ok || back != uri {
+		t.Fatalf("Mcp-Name %q decodes to %q", got, back)
+	}
+	if plain := Headers("tools/call", "echo").Get(server.HeaderName); plain != "echo" {
+		t.Fatalf("a plain name was changed: %q", plain)
+	}
+}

@@ -69,7 +69,8 @@ func (c *Client) Meta() map[string]any {
 	}
 }
 
-// Headers returns the request headers for method, including Mcp-Name for named requests.
+// Headers returns the request headers for method, including Mcp-Name for named requests (in its
+// Base64 form when the name cannot be sent as a plain value).
 func Headers(method, name string) http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
@@ -77,7 +78,8 @@ func Headers(method, name string) http.Header {
 	h.Set(server.HeaderProtocolVersion, server.ProtocolVersion)
 	h.Set(server.HeaderMethod, method)
 	if name != "" {
-		h.Set(server.HeaderName, name)
+		// a name that is not plain ASCII (a resource URI, say) cannot travel as a header value as it is
+		h.Set(server.HeaderName, server.EncodeHeaderValue(name))
 	}
 	return h
 }

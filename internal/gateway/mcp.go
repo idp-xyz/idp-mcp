@@ -147,6 +147,11 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		transport.WriteRejection(w, rej)
 		return
 	}
+	// Mcp-Param-* headers are forwarded to the upstream (forward); refuse the ones past the bounds early
+	if _, rej := server.ParamHeaders(r.Header, req.ID); rej != nil {
+		transport.WriteRejection(w, rej)
+		return
+	}
 	// one server span per request; a valid incoming traceparent is continued, else a trace starts
 	ctx := observability.Propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 	ctx, span := g.tracer.Start(ctx, "mcp "+req.Method, trace.WithSpanKind(trace.SpanKindServer),
@@ -306,6 +311,12 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 	}()
 	up, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	up.Header = client.Headers(req.Method, nameHeader)
+	// the one client header family that passes through: an intermediary forwards the Mcp-Param-* headers it
+	// does not recognise (2026-07-28 transport, SEP-2243). Authorization, Cookie and the rest do not.
+	extra, _ := server.ParamHeaders(r.Header, req.ID) // within the bounds: handleMCP checked them
+	for k, vs := range extra {
+		up.Header[k] = vs
+	}
 	observability.Propagator.Inject(ctx, propagation.HeaderCarrier(up.Header))
 	resp, err := st.upstream.HTTP.Do(up)
 	if err != nil {

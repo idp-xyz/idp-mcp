@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -312,6 +313,7 @@ func TestDiscoverPingAndUnfederatedMethods(t *testing.T) {
 	req, _ := http.NewRequest("POST", h.srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(server.HeaderProtocolVersion, server.ProtocolVersion)
+	req.Header.Set(server.HeaderMethod, "notifications/cancelled")
 	req.Header.Set("Authorization", "Bearer "+operatorKey)
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 202 {
@@ -345,7 +347,8 @@ func TestToolsCallIsRoutedUnderTheNativeName(t *testing.T) {
 	h := newHarness(t, "block")
 	tp := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 	r := h.rpc(t, operatorKey, "tools/call", call("minimal__echo", `{"text":"hello"}`),
-		map[string]string{server.HeaderName: "minimal__echo", "traceparent": tp, "Cookie": "s=1"})
+		map[string]string{server.HeaderName: "minimal__echo", "traceparent": tp, "Cookie": "s=1", "X-Api-Key": "k", "Proxy-Authorization": "Basic eA==",
+			"X-Forwarded-For": "10.0.0.1", "Mcp-Param-Region": "us-west1", "Mcp-Param-Note": "=?base64?w6k=?="})
 	if r.status != 200 || !strings.Contains(r.raw, `"text":"hello"`) || r.body["id"].(float64) != 11 {
 		t.Fatalf("%d %s", r.status, r.raw)
 	}
@@ -353,8 +356,14 @@ func TestToolsCallIsRoutedUnderTheNativeName(t *testing.T) {
 	if h.up.bodies[0]["params"].(map[string]any)["name"] != "echo" || up.Header.Get(server.HeaderName) != "echo" {
 		t.Fatalf("upstream got %v / %q", h.up.bodies[0]["params"], up.Header.Get(server.HeaderName))
 	}
-	if up.Header.Get("Authorization") != "" || up.Header.Get("Cookie") != "" {
-		t.Fatal("client credentials were forwarded upstream")
+	for _, h := range []string{"Authorization", "Cookie", "X-Api-Key", "Proxy-Authorization", "X-Forwarded-For"} {
+		if up.Header.Get(h) != "" {
+			t.Fatalf("client header %s was forwarded upstream", h)
+		}
+	}
+	// the Mcp-Param-* headers are the exception: an intermediary forwards the ones it does not recognise, as they came
+	if up.Header.Get("Mcp-Param-Region") != "us-west1" || up.Header.Get("Mcp-Param-Note") != "=?base64?w6k=?=" {
+		t.Fatalf("Mcp-Param-* headers not forwarded: %v", up.Header)
 	}
 	if !strings.HasPrefix(up.Header.Get("traceparent"), "00-0af7651916cd43dd8448eb211c80319c-") || strings.Contains(up.Header.Get("traceparent"), "b7ad6b7169203331") {
 		t.Fatalf("traceparent %q", up.Header.Get("traceparent"))
@@ -589,5 +598,44 @@ func TestMetricsCountDecisionsWithoutLeakingIdentities(t *testing.T) {
 		if strings.Contains(out, leak) {
 			t.Errorf("metrics expose %q", leak)
 		}
+	}
+}
+
+func TestMethodHeaderIsRequiredAndNameHeaderMayBeBase64(t *testing.T) {
+	h := newHarness(t, "block")
+	// no Mcp-Method: 400 / -32020 before authentication or routing (the helper sets it, so send it by hand)
+	body := `{"jsonrpc":"2.0","id":11,"method":"tools/list","params":{` + metaJSON + `}}`
+	req, _ := http.NewRequest("POST", h.srv.URL+"/mcp", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(server.HeaderProtocolVersion, server.ProtocolVersion)
+	req.Header.Set("Authorization", "Bearer "+operatorKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 400 || !strings.Contains(string(raw), `"code":-32020`) {
+		t.Fatalf("a request without Mcp-Method: %d %s", resp.StatusCode, raw)
+	}
+	// the Base64 form of Mcp-Name is decoded before it is compared with params.name, and what goes upstream is the native name
+	enc := "=?base64?" + base64.StdEncoding.EncodeToString([]byte("minimal__echo")) + "?="
+	r := h.rpc(t, operatorKey, "tools/call", call("minimal__echo", `{"text":"hi"}`), map[string]string{server.HeaderName: enc})
+	if r.status != 200 || !strings.Contains(r.raw, `"text":"hi"`) {
+		t.Fatalf("Base64 Mcp-Name: %d %s", r.status, r.raw)
+	}
+	r = h.rpc(t, operatorKey, "tools/call", call("minimal__echo", `{"text":"hi"}`),
+		map[string]string{server.HeaderName: "=?base64?" + base64.StdEncoding.EncodeToString([]byte("minimal__sum")) + "?="})
+	if r.status != 400 || errCode(r) != server.CodeVersionMismatch {
+		t.Fatalf("Base64 Mcp-Name of another tool: %d %s", r.status, r.raw)
+	}
+}
+
+func TestOversizedParamHeadersAreRefusedNotTruncated(t *testing.T) {
+	h := newHarness(t, "block")
+	r := h.rpc(t, operatorKey, "tools/call", call("minimal__echo", `{"text":"hi"}`),
+		map[string]string{server.HeaderName: "minimal__echo", "Mcp-Param-Big": strings.Repeat("a", server.MaxParamHeaderValue+1)})
+	if r.status != 400 || errCode(r) != server.CodeVersionMismatch || len(h.up.requests) != 0 {
+		t.Fatalf("%d %s (upstream saw %d)", r.status, r.raw, len(h.up.requests))
 	}
 }

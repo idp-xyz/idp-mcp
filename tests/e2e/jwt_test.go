@@ -120,6 +120,7 @@ func TestComposeJWT(t *testing.T) {
 	st, _ := e.mcp("", "tools/list", "", "")
 	req, _ = http.NewRequest("POST", resource, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{`+meta+`}}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mcp-Method", "tools/list") // required on every request (2026-07-28); without it the answer would be 400, not the 401 challenge
 	req.Header.Set("MCP-Protocol-Version", "2026-07-28")
 	resp, _ = direct.Do(req)
 	challenge := resp.Header.Get("WWW-Authenticate")

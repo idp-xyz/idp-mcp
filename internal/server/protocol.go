@@ -5,8 +5,13 @@ package server
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+	"unicode/utf8"
 )
 
 // ProtocolVersion is the only MCP revision this infrastructure speaks (ADR-0001 D12).
@@ -25,7 +30,80 @@ const (
 	HeaderProtocolVersion = "MCP-Protocol-Version"
 	HeaderMethod          = "Mcp-Method"
 	HeaderName            = "Mcp-Name"
+	HeaderParamPrefix     = "Mcp-Param-" // Mcp-Param-{Name}: a tool argument mirrored into a header (SEP-2243)
 )
+
+// Bounds on the Mcp-Param-* request headers the gateway forwards to an upstream. The gateway does not
+// know which of them a tool declares (x-mcp-header), so it forwards every one it receives; these
+// limits keep that from becoming a way to push bulk through the header block. A request over a bound
+// is refused rather than forwarded with some headers missing, which would make the upstream reject
+// it for a reason the caller cannot see.
+const (
+	MaxParamHeaders     = 16   // header lines
+	MaxParamHeaderName  = 128  // bytes of the name after the prefix
+	MaxParamHeaderValue = 1024 // bytes of one value, as sent (Base64 form included)
+)
+
+// The Base64 form of a header value (SEP-2243): =?base64?{Base64 of the UTF-8 value}?=
+const (
+	base64Prefix = "=?base64?"
+	base64Suffix = "?="
+)
+
+// DecodeHeaderValue returns the value a Mcp-Name or Mcp-Param-* header stands for: the Base64 form
+// is decoded, any other value is returned as it is. ok is false for a Base64 form that does not
+// decode to valid UTF-8 text.
+func DecodeHeaderValue(v string) (value string, ok bool) {
+	if len(v) < len(base64Prefix)+len(base64Suffix) || !strings.HasPrefix(v, base64Prefix) || !strings.HasSuffix(v, base64Suffix) {
+		return v, true
+	}
+	raw, err := base64.StdEncoding.DecodeString(v[len(base64Prefix) : len(v)-len(base64Suffix)])
+	if err != nil || !utf8.Valid(raw) {
+		return "", false
+	}
+	return string(raw), true
+}
+
+// EncodeHeaderValue returns v in the form to send as a header value: as it is if that is plain
+// printable ASCII without leading or trailing whitespace, else in the Base64 form. A value that
+// itself looks like the Base64 form is encoded too, so the receiver does not decode it by mistake.
+func EncodeHeaderValue(v string) string {
+	plain := v == strings.TrimSpace(v) && !strings.HasPrefix(v, base64Prefix)
+	for i := 0; plain && i < len(v); i++ {
+		plain = v[i] >= 0x20 && v[i] < 0x7f
+	}
+	if plain {
+		return v
+	}
+	return base64Prefix + base64.StdEncoding.EncodeToString([]byte(v)) + base64Suffix
+}
+
+// ParamHeaders returns the Mcp-Param-* headers of a request, or the rejection for a request that
+// exceeds the bounds above. It is what an intermediary forwards: the headers it does not recognise
+// are passed on and otherwise ignored (SEP-2243). Nothing else of the client's headers is.
+func ParamHeaders(h http.Header, id json.RawMessage) (http.Header, *Rejection) {
+	out := http.Header{}
+	var keys []string
+	for k := range h {
+		if strings.HasPrefix(http.CanonicalHeaderKey(k), HeaderParamPrefix) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	n := 0
+	for _, k := range keys {
+		if l := len(k) - len(HeaderParamPrefix); l == 0 || l > MaxParamHeaderName {
+			return nil, reject(400, id, CodeVersionMismatch, "invalid MCP routing header: "+HeaderParamPrefix+"*", nil)
+		}
+		for _, v := range h[k] {
+			if n++; n > MaxParamHeaders || len(v) > MaxParamHeaderValue {
+				return nil, reject(400, id, CodeVersionMismatch, "too many or too large "+HeaderParamPrefix+"* headers", nil)
+			}
+			out.Add(http.CanonicalHeaderKey(k), v)
+		}
+	}
+	return out, nil
+}
 
 // JSON-RPC and MCP error codes used by the gateway.
 const (
@@ -186,7 +264,11 @@ func Admit(body []byte, headerVersion, headerMethod string) (*Request, *Rejectio
 	if LegacyMethods[req.Method] {
 		return nil, reject(404, id, CodeMethodNotFound, "Method not found: "+req.Method, nil)
 	}
-	if headerMethod != "" && headerMethod != req.Method {
+	// the header is required on every request (2026-07-28 transport), not only checked when present
+	if headerMethod == "" {
+		return nil, reject(400, id, CodeVersionMismatch, "Mcp-Method header is required", nil)
+	}
+	if headerMethod != req.Method {
 		return nil, reject(400, id, CodeVersionMismatch, "Mcp-Method header does not match the body method", nil)
 	}
 	if req.IsNotification() || !RequestMethods[req.Method] {
@@ -255,7 +337,8 @@ func (r *Request) CheckNameHeader(header string) *Rejection {
 	_ = json.Unmarshal(r.Params, &params)
 	var name string
 	_ = json.Unmarshal(params[key], &name)
-	if header != name {
+	// the header may carry the name in its Base64 form; the comparison is with the decoded value
+	if decoded, ok := DecodeHeaderValue(header); !ok || decoded != name {
 		return reject(400, r.ID, CodeVersionMismatch, "invalid MCP routing header: "+HeaderName, nil)
 	}
 	return nil
