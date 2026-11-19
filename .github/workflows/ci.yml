@@ -2,7 +2,7 @@ name: CI
 
 # The merge gate of idp-mcp: formatting and vet, unit and contract tests (race detector on), the
 # integration suite against a throwaway PostgreSQL (the Makefile starts it in Docker), and the
-# offline image build. The compose end-to-end (deploy/e2e.sh) is not run here yet: its upstream
+# offline image build, and the official MCP conformance suite (its own job). The compose end-to-end (deploy/e2e.sh) is not run here yet: its upstream
 # fixture image is built from local SDK checkouts (deploy/fixtures/build.sh).
 
 on:
@@ -34,3 +34,30 @@ jobs:
         run: bash deploy/build.sh idp-mcp:ci
       - name: Image vulnerabilities (trivy, HIGH and CRITICAL with a fix fail the build)
         run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/aquasecurity/trivy:0.76.2 image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 idp-mcp:ci
+
+  conformance:
+    name: official MCP conformance (2026-07-28)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # the runner (npm ci from tests/conformance/runner/package-lock.json) and the reference server (the Python SDK at
+      # the commit pinned in tests/conformance/fetch.sh, dependencies from its uv.lock) are fetched by the target itself;
+      # it is the same command as locally. A failure in one of the 37 scored scenarios fails the job; the two known
+      # WARNINGs and the pending / extension scenarios are printed, not scored (see tests/conformance/conformance_test.go).
+      - name: Conformance (make conformance)
+        run: make conformance
+      - name: Evidence (runner logs and per-scenario checks)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-evidence
+          path: build/conformance/
+          retention-days: 30

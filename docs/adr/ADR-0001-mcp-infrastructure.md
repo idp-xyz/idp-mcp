@@ -105,6 +105,27 @@ MCP 基础设施把模型可调用的工具目录、认证授权和调用审计�
 - 网关自己给出的"不存在"错误用 HTTP 200，Python SDK 上游用 HTTP 400。未授权的请求总是得到网关的答复，所以这不泄露授权信息，但两者不一致。
 - JWT 模式仍未与真实 IdP 联调。
 
+**2026-11-19 复核：重跑、进 CI、仍未覆盖的**
+
+M6、M7 改了转发路径（调用者转发与签名）之后，官方符合性没有重跑过；2026-11-03 的结果（`build/conformance/20261103T075913Z`）是那之前的。2026-11-19 在没有改动任何代码的情况下重跑一次，再在补上下面三项传输要求（D12 的 2026-11-19 补充）后又跑一次。运行器同为 0.2.0-alpha.12。
+
+| | 计分的 37 个场景 | 计分场景里的 WARNING | “待定”场景（不计分） |
+|---|---|---|---|
+| 2026-11-03 | 37/37 | 2：订阅流上没有 `tools/list_changed`、`prompts/list_changed`（SHOULD；目录钉在 Release 里，上游变目录是漂移，不是列表变化，见 D29，故意如此） | `json-schema-2020-12` 通过；`http-header-validation` 失败 2 项（缺 `Mcp-Method` 仍放行；带空白的 `Mcp-Name`），`http-custom-header-server-validation` 失败 3 项（`Mcp-Param-*` 被丢弃） |
+| 2026-11-19，代码未改 | 37/37 | 同样 2 个 | 与 11-03 相同 |
+| 2026-11-19，补上 D12 的三项后 | 37/37 | 同样 2 个 | `http-custom-header-server-validation` 通过；`http-header-validation` 只剩 `sep-2243-server-accepts-whitespace-header-value` 一项 |
+
+剩下的那一项不是网关的问题：该场景取 `tools/list` 的第一个工具（Everything Server 的 `json_schema_2020_12_tool`）并以 `arguments: {}` 调用，而这个工具有必填参数，网关按钉住的参数定义返回 -32602；头里的空白网关已经正确地忽略了（HTTP 200，没有 `Mcp-Name` 的错误）。换一个没有必填参数的第一个工具，这一项就会通过。另外，运行器对 Everything Server 也会跑 tasks 扩展的场景，它没有 tasks 的夹具，这些场景按设计失败；tasks 扩展用专门的夹具另测（`tests/conformance/tasks_test.go`），直连与经网关都是 8/8。
+
+**现在进了 CI**：`.github/workflows/ci.yml` 的 `conformance` 作业运行 `make conformance`，本地与 CI 是同一条命令。运行器与参考服务器都固定了版本，不再依赖某个人的主目录：运行器是 npm 包 `@modelcontextprotocol/conformance@0.2.0-alpha.12`（`tests/conformance/runner/package-lock.json`，`npm ci`，带完整性哈希）；参考服务器是 Python SDK 的提交 `754254c08fe1c3eda18b69da3d336106fe8d72d6`（`tests/conformance/fetch.sh`），依赖按该提交自带的 `uv.lock` 安装（`uv sync --frozen`）。`CONFORMANCE_ROOT`、`REFERENCE_SERVER` 仍可用环境变量指向自己的构建。计分的 37 个场景有 FAILURE 就让作业失败；上面那 2 个 WARNING 保持为警告；“待定”与扩展场景只打印，不影响结果；证据（每个场景的 `checks.json` 与运行器日志）作为构件上传。**没有在 GitHub Actions 上跑过这个作业**，只在本机跑通了同一条命令。
+
+**仍然没有覆盖的**：
+- 网关作为客户端去连上游的那一面（发现、列表、转发）：官方套件只测服务器一侧。
+- OAuth：套件的运行器不能带凭据，测试夹具代理加了 API Key，JWT 与受保护资源元数据不在其中。
+- 带前缀的工具命名（官方场景按原名调用，见上）。
+- 多个目标。
+- 旧版本的客户端与服务，真实的第三方服务。
+
 ## 8. M3：钉住 prompts、参数校验、与真实 Keycloak 联调（2026-11-02，WSL 实测）
 
 **新增决策**

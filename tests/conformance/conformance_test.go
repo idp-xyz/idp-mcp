@@ -9,8 +9,15 @@
 // Release: one target (the Everything Server), native tool naming, every tool, prompt and resource
 // granted to the key's role.
 //
-//	IDP_CONFORMANCE_ROOT   mcp-conformance checkout with dist/index.js and requirements/2026-07-28.yaml
-//	IDP_REFERENCE_SERVER   mcp-everything-server executable
+// Only the 37 scored scenarios decide the result: a FAILURE in one of them (or a missing result) fails the test.
+// WARNING checks do not (the two known ones are the SHOULD about list_changed notifications on the subscription
+// stream, which a gateway with a pinned catalog deliberately does not send, ADR-0001 section 7). The scenarios
+// the runner marks pending or extension are run and printed, never scored: "make conformance" runs the Everything
+// Server, which has no tasks fixtures, so most of the tasks extension fails there by design and is scored
+// separately (tasks_test.go, against the task fixture).
+//
+//	IDP_CONFORMANCE_ROOT   runner with dist/index.js and requirements/2026-07-28.yaml (make: the pinned npm package)
+//	IDP_REFERENCE_SERVER   mcp-everything-server executable (make: the pinned Python SDK commit)
 //	IDP_CONFORMANCE_MIN    scenarios that must pass (default 37)
 package conformance
 
@@ -130,6 +137,45 @@ func score(dir string, required []string) (passed []string, failed map[string][]
 		}
 	}
 	return passed, failed
+}
+
+var dirSuffix = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}T.*$`)
+
+// report logs what the score does not count: the warnings of the scored scenarios and every other scenario the
+// runner ran (pending, extension), each with its failing checks. Nothing here fails the test.
+func report(t *testing.T, dir string, required []string) {
+	isRequired := map[string]bool{}
+	for _, s := range required {
+		isRequired[s] = true
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "server-") {
+			continue
+		}
+		name := dirSuffix.ReplaceAllString(strings.TrimPrefix(e.Name(), "server-"), "")
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name(), "checks.json"))
+		var checks []check
+		if err != nil || json.Unmarshal(raw, &checks) != nil {
+			continue
+		}
+		failing := 0
+		for _, c := range checks {
+			if c.Status == "FAILURE" {
+				failing++
+			}
+			if isRequired[name] && c.Status == "WARNING" {
+				t.Logf("WARNING (scored scenario, not a failure) %s %s: %.160s", name, c.ID, c.ErrorMessage)
+			}
+			// the tasks extension fails against the Everything Server by design (no fixtures): count it, do not itemise it
+			if !isRequired[name] && c.Status == "FAILURE" && !strings.HasPrefix(name, "tasks-") {
+				t.Logf("NOT SCORED, failing: %s %s: %.200s", name, c.ID, c.ErrorMessage)
+			}
+		}
+		if !isRequired[name] {
+			t.Logf("NOT SCORED: %-40s %d of %d checks fail", name, failing, len(checks))
+		}
+	}
 }
 
 func TestOfficialConformance(t *testing.T) {
@@ -253,6 +299,7 @@ func TestOfficialConformance(t *testing.T) {
 		t.Fatalf("expected 37 frozen server scenarios, read %d", len(required))
 	}
 	passed, failed := score(out, required)
+	report(t, out, required)
 	var bad []string
 	for s := range failed {
 		bad = append(bad, s)

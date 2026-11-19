@@ -29,10 +29,21 @@ pg-up:
 pg-down:
 	@docker rm -f $(PG_NAME) >/dev/null 2>&1 || true
 
-# Official MCP conformance suite (2026-07-28, 37 server scenarios) through the gateway.
-CONFORMANCE_ROOT ?= $(HOME)/workspace/idp-agentic/mcp-conformance
-REFERENCE_SERVER ?= $(HOME)/workspace/idp-agentic/mcp/IDP_MCP_P2_01F_Conformance_Fixture_V1.0/upstream/python-sdk/.venv/bin/mcp-everything-server
-.PHONY: conformance
-conformance:
+# Official MCP conformance suite (2026-07-28, 37 scored server scenarios) through the gateway, against the
+# pinned runner and reference server that tests/conformance/fetch.sh installs (npm ci from a lockfile; the
+# Python SDK at a commit with its own uv.lock). CI runs exactly this target. Point CONFORMANCE_ROOT (a runner
+# checkout with dist/index.js and requirements/) and REFERENCE_SERVER (an mcp-everything-server executable) at
+# your own builds to run against those instead; the fetch of that part is then skipped.
+CONFORMANCE_DEPS ?= $(CURDIR)/build/conformance-deps
+CONFORMANCE_ROOT ?= $(CURDIR)/tests/conformance/runner/node_modules/@modelcontextprotocol/conformance
+REFERENCE_SERVER ?= $(CONFORMANCE_DEPS)/python-sdk/.venv/bin/mcp-everything-server
+.PHONY: conformance conformance-deps
+conformance-deps:
+	@CONFORMANCE_DEPS=$(CONFORMANCE_DEPS) \
+	FETCH_RUNNER=$(if $(filter command line environment,$(origin CONFORMANCE_ROOT)),0,1) \
+	FETCH_REFERENCE=$(if $(filter command line environment,$(origin REFERENCE_SERVER)),0,1) \
+	bash tests/conformance/fetch.sh
+
+conformance: conformance-deps
 	IDP_CONFORMANCE_ROOT=$(CONFORMANCE_ROOT) IDP_REFERENCE_SERVER=$(REFERENCE_SERVER) \
 	go test -count=1 -v -timeout 20m ./tests/conformance/

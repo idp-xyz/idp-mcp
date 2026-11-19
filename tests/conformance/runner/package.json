@@ -1,0 +1,8 @@
+{
+  "name": "idp-mcp-conformance-runner",
+  "private": true,
+  "description": "Pins the official MCP conformance runner used by make conformance (ADR-0001 section 7).",
+  "dependencies": {
+    "@modelcontextprotocol/conformance": "0.2.0-alpha.12"
+  }
+}
