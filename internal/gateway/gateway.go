@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"idp-mcp/adapters/identity"
+	"idp-mcp/internal/admission"
 	"idp-mcp/internal/authorization"
 	"idp-mcp/internal/client"
 	"idp-mcp/internal/invocation"
@@ -50,6 +51,10 @@ type Config struct {
 	// CallerSigner signs the caller forwarded to targets approved for identity (ADR-0001 D44); nil sends the
 	// caller unsigned, and the upstream then has only the network to trust.
 	CallerSigner *CallerSigner
+	// Clients lists the OAuth clients the gateway serves and what each may reach (ADR-0001 D46 to D49), and
+	// holds the rate limits. Nil lists nobody, so every client sees nothing: the program refuses to start
+	// without the file, and a library user who forgets it gets the closed answer, not an open one.
+	Clients *admission.Clients
 }
 
 // Target health as last checked against the pinned catalog.
@@ -140,16 +145,18 @@ func (s *state) setTarget(ts TargetStatus) {
 
 // Gateway is a running data plane.
 type Gateway struct {
-	cfg       Config
-	cur       atomic.Pointer[state]
-	checkNow  chan struct{}
-	lastError atomic.Value // string
-	refused   atomic.Value // [2]string{digest, reason}
-	hosts     map[string]bool
-	listeners hub // open subscriptions/listen streams
-	tasks     taskStore
-	tracer    trace.Tracer
-	metrics   *observability.Metrics
+	cfg          Config
+	cur          atomic.Pointer[state]
+	checkNow     chan struct{}
+	lastError    atomic.Value // string
+	refused      atomic.Value // [2]string{digest, reason}
+	hosts        map[string]bool
+	listeners    hub // open subscriptions/listen streams
+	tasks        taskStore
+	tracer       trace.Tracer
+	metrics      *observability.Metrics
+	limiter      *admission.Limiter // request windows per client and per subject (D49)
+	authFailures *observability.CounterVec
 }
 
 // meteredRecorder counts every decision and observes its latency before passing it on.
@@ -195,7 +202,8 @@ func New(cfg Config) *Gateway {
 		decisions: cfg.Metrics.Counter("idp_mcp_gateway_decisions_total", "Gateway decisions by MCP method, decision and outcome.", "method", "decision", "outcome"),
 		latency:   cfg.Metrics.Histogram("idp_mcp_gateway_decision_duration_seconds", "Latency of decided requests by MCP method.", observability.DurationBuckets, "method")}
 	g := &Gateway{cfg: cfg, checkNow: make(chan struct{}, 1), hosts: map[string]bool{"127.0.0.1": true, "localhost": true, "::1": true},
-		tracer: cfg.Tracer.Tracer("idp-mcp/gateway"), metrics: cfg.Metrics}
+		tracer: cfg.Tracer.Tracer("idp-mcp/gateway"), metrics: cfg.Metrics, limiter: admission.NewLimiter(nil),
+		authFailures: cfg.Metrics.Counter("idp_mcp_gateway_auth_failures_total", "Requests whose bearer credential was missing or refused, audited or not.")}
 	g.metrics.GaugeFunc("idp_mcp_gateway_listen_streams", "Open subscriptions/listen streams.", nil,
 		func() []observability.LabeledValue {
 			return []observability.LabeledValue{{Value: float64(g.ListenStreams())}}
@@ -296,7 +304,7 @@ func (g *Gateway) activate(env *release.Envelope) error {
 		}
 		resources[t.Name] = idx
 	}
-	st := &state{env: env, doc: doc, auth: auth, policy: authorization.Compile(doc), router: routing.New(doc), args: args, resources: resources,
+	st := &state{env: env, doc: doc, auth: auth, policy: authorization.Compile(doc, g.cfg.Clients), router: routing.New(doc), args: args, resources: resources,
 		upstream: &client.Client{HTTP: client.NewHTTPClient(policy.ForTargets(hosts, g.cfg.DevMode), g.cfg.CallTimeout, g.cfg.UpstreamTLS), Info: g.cfg.Info},
 		loadedAt: time.Now().UTC(), targets: map[string]TargetStatus{}}
 	for _, t := range doc.Targets {

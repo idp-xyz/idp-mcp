@@ -22,6 +22,37 @@ IDP TELOS 的 MCP 基础设施：`mcp-gateway`（数据面）和 `registry-servi
 - **全链路 TLS**：管理 API 与数据面可配 HTTPS；网关对注册服务可用 mTLS，证书绑定到网关凭据；各出口的 CA 分开配置。
 - **多副本**：同一网关记录的副本各自自证，部署只有在所有存活副本都运行该 Release 时才判 GOOD。
 - **谁代表谁**：JWT 的 `azp` 与 `act`（RFC 8693 委派）进调用审计。
+- **按客户端授权，缺省什么都看不到**：令牌里的 OAuth 客户端（`azp`）要列在网关的客户端文件里，工具对一次调用可见，要同时满足角色允许、客户端允许；没列出的客户端通过了认证也看不到任何东西。见下面"客户端准入"。
+
+## 客户端准入（ADR-0001 第 14 节）
+
+网关**不带客户端文件就不启动**（`IDP_GATEWAY_CLIENTS_FILE`，YAML 或 JSON）。文件列出网关服务的 OAuth 客户端（令牌的 `azp`），说明谁是 HOST、哪些工具只许 HOST 调用、限流是多少：
+
+```yaml
+clients:
+  idp-host: {kind: platform, host: true}                    # HOST：按成员的角色看见和调用，也是唯一能调用"只许 HOST"的工具的客户端
+  idp-workspace: {kind: platform}                           # 平台自己的客户端：看见其用户的角色允许的一切（"只许 HOST"的除外）
+  partner-docs:                                             # 外部客户端：角色允许、并且这里列了才可见
+    kind: external
+    servers: [docs]                                         # 这些服务器的全部工具、prompts、resources
+    tools: ["wiki__search*"]                                # 再加这些工具（path.Match 语法，对外暴露的工具名；与 HOST 的 externalTools 同一种写法）
+hostOnlyTools: ["web__*"]                                   # 只许 HOST 调用的工具；网关不内置任何缺省，由部署写
+hostOnlyExcept:                                             # 运维对个别工具的例外；理由必填，每次使用都写进审计
+  - {pattern: "web__web_search", reason: "安全组 2026-11 批准，工单 SEC-17"}
+rateLimits:                                                 # 只套在外部客户端和没列出的客户端上，每个副本各自计数；下面是缺省值
+  perClient: {requests: 600, window: 1m}
+  perSubject: {requests: 120, window: 1m}
+```
+
+- 没列出的客户端、没有 `azp` 的令牌：`tools/list`、`prompts/list`、`resources/list` 给空列表，所有调用得到与"工具不存在"相同的应答，每一次都进审计（原因 `client not listed`）。
+- 想保持原来的行为（服务每一个客户端）：写 `"*": platform`。**这等于关掉这项控制**，网关启动时会告警；只用于开发和还没有清单的过渡期。
+- API Key 的客户端是 `api-key:<密钥 id>`，要像别的客户端一样列出（或用上面的 `"*"`）。
+- 外部客户端的 `tools` 只授予工具；prompts 和 resources 只能按服务器授予（`servers`）。
+- 文件里写错一个字段名、模式或种类，网关拒绝启动，并说明哪一项错了：拼错的 `hostOnlyTool` 不会悄悄让控制失效。
+- 限流：平台客户端缺省没有任何限制（HOST 替所有成员调用，服务账号在一个 subject 下跑很多执行）；外部客户端用 `rateLimits` 的缺省，可用条目里的 `rateLimit`（每客户端）、`subjectRateLimit`（每成员）覆盖，平台客户端也可以用它们给自己加上限；没列出的客户端永远受缺省限制。
+- 被限流的请求得到 HTTP 429、`Retry-After` 和 JSON-RPC 错误 -32029，并进审计（`RATE_LIMITED`）。
+
+升级说明：见 ADR-0001 第 14 节。先升级注册服务（迁移 `0008`，契约 1.2.0），再升级网关；**网关没有客户端文件就不再启动**。
 
 ## 目录
 

@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"idp-mcp/internal/admission"
 )
 
 const dir = "../../deploy/kubernetes"
@@ -294,5 +296,41 @@ func TestNetworkPolicyIsDefaultDenyWithTheGatewayOnItsPortOnly(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestTheGatewayHasAValidClientsFileMountedWhereItsSettingPoints(t *testing.T) {
+	var cm, cfg, dep doc
+	for _, d := range load(t, "gateway.yaml") {
+		switch name(d) {
+		case "ConfigMap/idp-mcp-gateway-edge-1-clients":
+			cm = d
+		case "ConfigMap/idp-mcp-gateway-edge-1":
+			cfg = d
+		case "Deployment/idp-mcp-gateway-edge-1":
+			dep = d
+		}
+	}
+	if cm == nil || cfg == nil || dep == nil {
+		t.Fatal("the gateway's clients ConfigMap, settings or Deployment is missing")
+	}
+	if _, err := admission.Parse([]byte(str(cm, "data", "clients.yaml"))); err != nil {
+		t.Fatalf("the shipped clients file does not load: %v", err)
+	}
+	want := str(cfg, "data", "IDP_GATEWAY_CLIENTS_FILE")
+	mounted := false
+	for _, c := range list(dep, "spec", "template", "spec", "containers") {
+		for _, m := range list(c, "volumeMounts") {
+			if str(m, "name") == "clients" && want == str(m, "mountPath")+"/clients.yaml" {
+				mounted = true
+			}
+		}
+	}
+	vol := false
+	for _, v := range list(dep, "spec", "template", "spec", "volumes") {
+		vol = vol || (str(v, "name") == "clients" && str(v, "configMap", "name") == "idp-mcp-gateway-edge-1-clients")
+	}
+	if !mounted || !vol {
+		t.Fatalf("IDP_GATEWAY_CLIENTS_FILE %q is not a file of the mounted clients ConfigMap (mounted %v, volume %v)", want, mounted, vol)
 	}
 }

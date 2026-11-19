@@ -5,14 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"idp-mcp/adapters/identity"
+	"idp-mcp/internal/admission"
 	"idp-mcp/internal/authorization"
 	"idp-mcp/internal/client"
+	"idp-mcp/internal/invocation"
 	"idp-mcp/internal/release"
 	"idp-mcp/internal/server"
 	"idp-mcp/internal/transport"
@@ -152,6 +155,7 @@ func (g *Gateway) listen(w http.ResponseWriter, r *http.Request, st *state, req 
 		transport.WriteError(w, http.StatusBadRequest, req.ID, err.(*server.Error))
 		return
 	}
+	rec := g.recorder(r, st, pr, req, invocation.Whole)
 	sub, ok := g.listeners.add()
 	if !ok {
 		transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError, Message: "Too many open listen streams"})
@@ -163,7 +167,7 @@ func (g *Gateway) listen(w http.ResponseWriter, r *http.Request, st *state, req 
 
 	// the filter this gateway honours for this caller
 	resourceTargets := targetsWith(st.doc, release.CapResources, st.policy.ResourceTargets(pr))
-	f := filter{Tools: p.Notifications.ToolsListChanged}
+	f := filter{Tools: p.Notifications.ToolsListChanged && st.policy.Listed(pr)} // the release-change signal names nothing, but is not sent to a client that is not served
 	f.Prompts = p.Notifications.PromptsListChanged && len(targetsWith(st.doc, release.CapPrompts, st.policy.PromptTargets(pr))) > 0
 	relayTargets := map[string]*relaySpec{}
 	if p.Notifications.ResourcesListChanged {
@@ -207,15 +211,37 @@ func (g *Gateway) listen(w http.ResponseWriter, r *http.Request, st *state, req 
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	send := func(b []byte) bool {
-		if _, err := w.Write([]byte("event: message\ndata: ")); err != nil {
+		n, err := w.Write([]byte("event: message\ndata: "))
+		rec.relayed(n)
+		if err != nil {
 			return false
 		}
-		if _, err := w.Write(append(b, '\n', '\n')); err != nil {
+		n, err = w.Write(append(b, '\n', '\n'))
+		rec.relayed(n)
+		if err != nil {
 			return false
 		}
 		return rc.Flush() == nil
 	}
+	// The record of a subscription is two: it opens (with what was honoured, as counts: the resources and tasks a
+	// caller names are not repeated) and it closes, with how long it lasted and how many bytes were sent. A client
+	// the gateway does not serve is answered with an acknowledgment that honours nothing and the end of the stream,
+	// and recorded once, as refused.
+	if !st.policy.Listed(pr) {
+		rec.reason(admission.NotListed)
+		defer rec.done("", invocation.Deny, invocation.OutcomeDenied)
+	} else {
+		rec.reason(fmt.Sprintf("tools=%t prompts=%t resources=%t subscriptions=%d tasks=%d", f.Tools, f.Prompts, f.Resources, len(f.Subscriptions), len(f.TaskIDs)))
+		rec.started()
+		defer rec.done("", invocation.Allow, invocation.OutcomeStreamed)
+	}
 	if !send(notification("notifications/subscriptions/acknowledged", map[string]any{"notifications": f.honoured()}, subID)) {
+		return
+	}
+	if !st.policy.Listed(pr) {
+		res, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": subID,
+			"result": map[string]any{"resultType": "complete", "_meta": map[string]any{MetaSubscriptionID: subID}}})
+		send(res)
 		return
 	}
 

@@ -24,6 +24,18 @@ const (
 	OutcomeUnknown      = "UNKNOWN"       // sent, but no answer (timeout, broken connection)
 	OutcomeDenied       = "DENIED"
 	OutcomeInvalidArgs  = "INVALID_ARGUMENTS" // refused before delivery: arguments violate the pinned inputSchema
+	// OutcomeStreamStarted marks the first of the two records of a streamed answer: the upstream began an event
+	// stream. The second, OutcomeStreamed, carries the end, the duration and the bytes (ADR-0001 D49).
+	OutcomeStreamStarted = "STREAM_STARTED"
+	OutcomeRateLimited   = "RATE_LIMITED"    // refused by the per-client or per-subject limit
+	OutcomeUnauthorized  = "UNAUTHENTICATED" // the credential was missing or refused
+)
+
+// What a record names when there is no subject (the caller was not authenticated) or no single tool, prompt,
+// resource or task (a list, a subscription, a refused request): the registry stores both as required.
+const (
+	NoSubject = "(none)"
+	Whole     = "*"
 )
 
 // Record is one decision. Its JSON form is the published InvocationRecord contract (idp.telos.mcp
@@ -35,7 +47,7 @@ type Record struct {
 	Client        string    `json:"client,omitempty"` // OAuth client the token was issued to (azp)
 	Actor         string    `json:"actor,omitempty"`  // delegated caller (RFC 8693 act), if any
 	AuthMethod    string    `json:"authMethod"`
-	Method        string    `json:"method"` // tools/call, prompts/get, resources/read, completion/complete, tasks/get|cancel|update
+	Method        string    `json:"method"` // tools/call, prompts/get, resources/read, completion/complete, tasks/get|cancel|update, the list methods, subscriptions/listen, server/discover (refused only)
 	Tool          string    `json:"tool"`   // exposed tool or prompt name, resource URI, completion ref or task id, as requested
 	Target        string    `json:"target,omitempty"`
 	Decision      string    `json:"decision"`
@@ -43,6 +55,12 @@ type Record struct {
 	LatencyMS     int64     `json:"latencyMs"`
 	TraceID       string    `json:"traceId,omitempty"`
 	ArgsDigest    string    `json:"argsDigest,omitempty"`
+	// Reason says why a request was refused ("client not listed", "host-only", "role", "client rate limit; retry
+	// after 12s") or that an operator's host-only exception let it through. It is made of the gateway's own
+	// words and the operator's exception reason: never of anything the client sent.
+	Reason string `json:"reason,omitempty"`
+	// Bytes is how much of an event stream was relayed; set on the record that ends a stream.
+	Bytes int64 `json:"bytes,omitempty"`
 }
 
 // Recorder accepts records without blocking.

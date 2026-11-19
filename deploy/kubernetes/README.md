@@ -18,7 +18,8 @@
 2. 创建 Secrets：数据库的两个连接串（服务角色、所有者）；注册服务的服务器证书与其 CA；签发网关客户端证书的 CA；上游 CA（可选）。证书用 cert-manager 更省事。
 3. `kubectl apply -k deploy/kubernetes`，等 Job 完成、注册服务就绪。
 4. 用管理员令牌 `POST /api/v1/gateways`（`authMode: jwt`，`resource` 为客户端访问网关的公开 URL），把返回的 `gatewayId` 和 `token` 写入 `idp-mcp-gateway-edge-1` Secret；给这个网关签发客户端证书（URI SAN 用 `gatewayId`）。网关 Pod 起来后会拉取期望状态并上报心跳。
-5. 注册上游、审批、授权、编译并部署 Release（`api/openapi.yaml`）。
+5. 编辑 ConfigMap `idp-mcp-gateway-edge-1-clients`（`gateway.yaml`）：列出调用这个网关的 OAuth 客户端（令牌的 `azp`）、其中谁是 HOST、`hostOnlyTools`（例如 `["web__*"]`）。**网关没有这个文件就不启动**；没列出的客户端什么都看不到。格式与含义见 README"客户端准入"。Pod 在启动时读文件，改动要滚动重启。
+6. 注册上游、审批、授权、编译并部署 Release（`api/openapi.yaml`）。
 
 ## 已知限制
 

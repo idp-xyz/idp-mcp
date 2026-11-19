@@ -138,6 +138,24 @@ func TestComposeJWT(t *testing.T) {
 	st, c := e.mcp(allowed, "tools/call", call("minimal__echo", `{"text":"via keycloak"}`), "minimal__echo")
 	check("allowed-call", st == 200 && strings.Contains(fmt.Sprint(c["result"]), "via keycloak"), st, c)
 	st, l = e.mcp(viewer, "tools/list", "", "")
+	// client admission (ADR-0001 D46 to D48): the same role, other clients. deploy/e2e.sh lists idp-agent-allowed as
+	// the host, idp-agent-plain as a platform client, idp-agent-partner as an external client allowed minimal__echo,
+	// declares minimal__sum host-only, and does not list idp-agent-stranger
+	plain, partner, stranger := e.kcToken("agent-plain"), e.kcToken("agent-partner"), e.kcToken("agent-stranger")
+	st, l = e.mcp(plain, "tools/list", "", "")
+	check("platform-client-misses-host-only-tool", st == 200 && strings.Join(toolList(l), ",") == "minimal__echo", st, toolList(l))
+	st, c = e.mcp(plain, "tools/call", call("minimal__sum", `{"a":1,"b":2}`), "minimal__sum")
+	check("platform-client-host-only-call-refused", st == 200 && strings.Contains(fmt.Sprint(c["error"]), "Unknown tool"), st, c)
+	st, c = e.mcp(allowed, "tools/call", call("minimal__sum", `{"a":1,"b":2}`), "minimal__sum")
+	check("host-client-host-only-call-allowed", st == 200 && c["error"] == nil, st, c)
+	st, l = e.mcp(partner, "tools/list", "", "")
+	check("external-client-sees-its-allow-list", st == 200 && strings.Join(toolList(l), ",") == "minimal__echo", st, toolList(l))
+	st, c = e.mcp(partner, "tools/call", call("minimal__sum", `{"a":1,"b":2}`), "minimal__sum")
+	check("external-client-outside-its-list-refused", st == 200 && strings.Contains(fmt.Sprint(c["error"]), "Unknown tool"), st, c)
+	st, l = e.mcp(stranger, "tools/list", "", "")
+	check("unlisted-client-empty-catalog", st == 200 && len(toolList(l)) == 0, st, toolList(l))
+	st, c = e.mcp(stranger, "tools/call", call("minimal__echo", `{"text":"x"}`), "minimal__echo")
+	check("unlisted-client-call-refused", st == 200 && strings.Contains(fmt.Sprint(c["error"]), "Unknown tool"), st, c)
 	check("viewer-empty-catalog", st == 200 && len(toolList(l)) == 0, st, toolList(l))
 	st, c = e.mcp(viewer, "tools/call", call("minimal__echo", `{"text":"x"}`), "minimal__echo")
 	check("viewer-call-denied", st == 200 && c["error"] != nil && strings.Contains(fmt.Sprint(c["error"]), "Unknown tool"), st, c)
@@ -152,6 +170,18 @@ func TestComposeJWT(t *testing.T) {
 	check("tampered-token-401", st == 401, st)
 	st, c = e.mcp(allowed, "tools/call", call("minimal__echo", `{"text":"`+strings.Repeat("x", 600)+`"}`), "minimal__echo")
 	check("arguments-validated", c["error"] != nil && strings.Contains(fmt.Sprint(c["error"]), "maxLength"), st, c)
+
+	// --- the gateway's records say why: the unlisted client, the host-only tool, the client of every call
+	reasons := map[string]bool{}
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && !(reasons["client not listed"] && reasons["host-only"]); time.Sleep(300 * time.Millisecond) {
+		for _, inv := range e.api(rev, "GET", "/api/v1/invocations", nil, 200)["items"].([]any) {
+			m := inv.(map[string]any)
+			if r, _ := m["reason"].(string); r != "" && m["decision"] == "DENY" {
+				reasons[r] = true
+			}
+		}
+	}
+	check("invocations-say-why-a-call-was-refused", reasons["client not listed"] && reasons["host-only"], reasons)
 
 	// --- the audit trail records the Keycloak subjects
 	subjects := map[string]bool{}

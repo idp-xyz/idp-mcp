@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:idp:telos:mcp:1.1.0",
-  "title": "idp.telos.mcp 1.1.0",
+  "$id": "urn:idp:telos:mcp:1.2.0",
+  "title": "idp.telos.mcp 1.2.0",
   "description": "idp-mcp（MCP 基础设施）对外发布的契约：Release（网关唯一运行的不可变配置，ADR-0001 D2）、Envelope（Release 加内容摘要，注册服务与网关之间、以及导出时的形态）和 InvocationRecord（网关对每次调用的判定记录，ADR-0001 D11）。生产者是 idp-mcp，权威副本在 idp-mcp/api/contracts/，由 go test ./internal/release -run TestContract 保证与实现一致；idp-contracts 中的副本只能与之逐字节相同。JSON Schema 只描述形状与可本地判定的规则；摘要是否匹配、名字是否跨目标唯一、授权是否引用了存在的工具等由 release.Document.Validate 判定。",
   "oneOf": [
     {"$ref": "#/$defs/Release"},
@@ -223,18 +223,20 @@
       "properties": {
         "at": {"type": "string", "format": "date-time"},
         "releaseDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-        "subject": {"type": "string", "minLength": 1},
+        "subject": {"type": "string", "minLength": 1, "description": "未认证的请求记为 \"(none)\""},
         "client": {"type": "string", "minLength": 1, "description": "令牌签发给的 OAuth 客户端（azp）"},
         "actor": {"type": "string", "minLength": 1, "description": "委派调用者（act.sub）"},
         "authMethod": {"enum": ["api-key", "jwt"]},
-        "method": {"enum": ["tools/call", "prompts/get", "resources/read", "completion/complete", "tasks/get", "tasks/cancel", "tasks/update"]},
-        "tool": {"type": "string", "minLength": 1, "maxLength": 2048, "description": "对外暴露的工具名或 prompt 名、资源 URI、补全引用的名字或 URI，或 task id，按请求原样"},
+        "method": {"enum": ["tools/call", "prompts/get", "resources/read", "completion/complete", "tasks/get", "tasks/cancel", "tasks/update", "tools/list", "prompts/list", "resources/list", "resources/templates/list", "subscriptions/listen", "server/discover"]},
+        "tool": {"type": "string", "minLength": 1, "maxLength": 2048, "description": "对外暴露的工具名或 prompt 名、资源 URI、补全引用的名字或 URI，或 task id，按请求原样；列表、订阅和被拒绝的请求记为 \"*\""},
         "target": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$", "description": "解析到的目标；判定为 DENY 时通常没有"},
         "decision": {"enum": ["ALLOW", "DENY"]},
-        "outcome": {"enum": ["OK", "TOOL_ERROR", "RPC_ERROR", "STREAMED", "NOT_DELIVERED", "UNKNOWN", "DENIED", "INVALID_ARGUMENTS"]},
+        "outcome": {"enum": ["OK", "TOOL_ERROR", "RPC_ERROR", "STREAMED", "NOT_DELIVERED", "UNKNOWN", "DENIED", "INVALID_ARGUMENTS", "STREAM_STARTED", "RATE_LIMITED", "UNAUTHENTICATED"]},
         "latencyMs": {"type": "integer", "minimum": 0},
         "traceId": {"type": "string", "pattern": "^[0-9a-f]{32}$", "description": "W3C trace id，有追踪上下文时写入"},
-        "argsDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "参数规范化 JSON 的摘要，只对 tools/call 且有参数时写入"}
+        "argsDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "参数规范化 JSON 的摘要，只对 tools/call 且有参数时写入"},
+        "reason": {"type": "string", "maxLength": 512, "description": "拒绝的原因（client not listed、host-only、role、限流要等多久）或运维的只许 HOST 例外所写的理由；只含网关自己的措辞和运维写的理由，从不含客户端发来的内容"},
+        "bytes": {"type": "integer", "minimum": 0, "description": "事件流已转发的字节数；只写在结束一条流的记录里（STREAMED）"}
       }
     }
   }

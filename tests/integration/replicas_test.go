@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"idp-mcp/internal/admission"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,7 +31,7 @@ func startReplica(t *testing.T, regURL, token, gid, instance string, poll time.D
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sync := &gateway.RegistrySync{BaseURL: regURL, Token: token, HTTP: &http.Client{Timeout: 5 * time.Second},
 		PollInterval: poll, HeartbeatInterval: 150 * time.Millisecond, Log: log}
-	g := gateway.New(gateway.Config{GatewayID: gid, InstanceID: instance, Info: server.ServerInfo{Name: "gw", Version: "it"}, DevMode: true,
+	g := gateway.New(gateway.Config{GatewayID: gid, Clients: admission.Unrestricted(), InstanceID: instance, Info: server.ServerInfo{Name: "gw", Version: "it"}, DevMode: true,
 		CallTimeout: 5 * time.Second, DriftInterval: 300 * time.Millisecond, Log: log})
 	sync.Gateway = g
 	ctx, cancel := context.WithCancel(context.Background())

@@ -90,7 +90,10 @@ services:
       IDP_REGISTRY_CA_FILE: ${IDP_IDENTITY_CA:-}
       IDP_IDENTITY_CA_FILE: ${IDP_IDENTITY_CA:-}
       IDP_METRICS_LISTEN: 0.0.0.0:9464
-    volumes: ['../.local/tls:/etc/idp/tls:ro']
+      # the OAuth clients served, which is the HOST, the host-only tools, the rate limits: written by deploy/e2e.sh per
+      # mode (the gateway does not start without it; ADR-0001 D46)
+      IDP_GATEWAY_CLIENTS_FILE: /etc/idp/clients.yaml
+    volumes: ['../.local/tls:/etc/idp/tls:ro', '../.local/gateway-clients.yaml:/etc/idp/clients.yaml:ro']
     depends_on: [registry, minimal, reference]
 
   # development identity provider for MODE=jwt (deploy/keycloak/realm.py generates the realm).

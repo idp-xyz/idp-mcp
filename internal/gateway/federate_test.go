@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"idp-mcp/internal/admission"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -157,9 +158,9 @@ func richRelease(t *testing.T, naming string, ups ...*richUpstream) *release.Env
 	return env
 }
 
-func richHarness(t *testing.T, env *release.Envelope) *harness {
+func richHarness(t *testing.T, env *release.Envelope, clients ...*admission.Clients) *harness {
 	rec := &recorder{}
-	g := New(Config{GatewayID: "g1", Info: server.ServerInfo{Name: "gw", Version: "t"}, DevMode: true, CallTimeout: 2 * time.Second, Recorder: rec})
+	g := New(Config{GatewayID: "g1", Clients: clientsOrOpen(clients), Info: server.ServerInfo{Name: "gw", Version: "t"}, DevMode: true, CallTimeout: 2 * time.Second, Recorder: rec})
 	if err := g.Activate(env); err != nil {
 		t.Fatal(err)
 	}

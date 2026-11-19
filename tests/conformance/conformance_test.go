@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"idp-mcp/internal/admission"
 	"io"
 	"log/slog"
 	"net"
@@ -264,7 +265,7 @@ func TestOfficialConformance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := gateway.New(gateway.Config{GatewayID: "g", Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: "conformance"},
+	g := gateway.New(gateway.Config{GatewayID: "g", Clients: runnerClients(t), Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: "conformance"},
 		DevMode: true, CallTimeout: 30 * time.Second, Log: log})
 	if err := g.Activate(env); err != nil {
 		t.Fatal(err)
@@ -318,4 +319,15 @@ func TestOfficialConformance(t *testing.T) {
 	if len(passed) < min {
 		t.Errorf("%d/37 < required %d", len(passed), min)
 	}
+}
+
+// runnerClients lists the official runner's client, an API key (client id "api-key:k"), as a platform client:
+// it sees what its role allows, which is what the 37 scored scenarios assume of a gateway.
+func runnerClients(t *testing.T) *admission.Clients {
+	t.Helper()
+	c, err := admission.Parse([]byte(`clients: {"api-key:k": platform}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

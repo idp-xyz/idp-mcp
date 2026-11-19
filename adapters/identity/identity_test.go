@@ -197,3 +197,28 @@ func TestBearerParsing(t *testing.T) {
 		t.Fatal("duplicate Authorization accepted")
 	}
 }
+
+func TestTheClientOfATokenIsItsAzpAndATokenWithoutOneHasNone(t *testing.T) {
+	k, auth := setup(t)
+	with, err := auth.Authenticate(context.Background(), sign(t, jwt.SigningMethodRS256, "rsa-1", k.rsa, claims(func(c jwt.MapClaims) { c["azp"] = "idp-host" })))
+	if err != nil || with.Client != "idp-host" || with.ClientID() != "idp-host" {
+		t.Fatalf("%+v %v", with, err)
+	}
+	// client_id is not read: the platform's Keycloak puts the client in azp, and one claim keeps one meaning
+	without, err := auth.Authenticate(context.Background(), sign(t, jwt.SigningMethodRS256, "rsa-1", k.rsa, claims(func(c jwt.MapClaims) { c["client_id"] = "idp-host" })))
+	if err != nil || without.Client != "" || without.ClientID() != "" {
+		t.Fatalf("%+v %v", without, err)
+	}
+	notString, err := auth.Authenticate(context.Background(), sign(t, jwt.SigningMethodRS256, "rsa-1", k.rsa, claims(func(c jwt.MapClaims) { c["azp"] = []any{"idp-host"} })))
+	if err != nil || notString.ClientID() != "" {
+		t.Fatalf("%+v %v", notString, err)
+	}
+}
+
+func TestAnAPIKeyIsTheClientNamedAfterItsID(t *testing.T) {
+	d := &release.Document{TenantID: "t1", Auth: release.Auth{Mode: "api-key", APIKeys: []release.APIKey{{ID: "ci", Subject: "svc", Roles: []string{"operator"}, SHA256: HashKey("secret-key-0123456789abcdef0000")}}}}
+	p, err := NewAPIKeys(d).Authenticate(context.Background(), "secret-key-0123456789abcdef0000")
+	if err != nil || p.ClientID() != "api-key:ci" {
+		t.Fatalf("%+v %v", p, err)
+	}
+}

@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"idp-mcp/internal/admission"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -127,7 +128,12 @@ func (u *tasksUpstream) count(prefix string) int {
 	return n
 }
 
-func tasksHarness(t *testing.T, u *tasksUpstream) *harness {
+func tasksHarness(t *testing.T, u *tasksUpstream, clients ...*admission.Clients) *harness {
+	return tasksHarnessWith(t, u, nil, clients...)
+}
+
+// tasksHarnessWith is tasksHarness with the release document changed by mutate first.
+func tasksHarnessWith(t *testing.T, u *tasksUpstream, mutate func(*release.Document), clients ...*admission.Clients) *harness {
 	var raws []json.RawMessage
 	_ = json.Unmarshal([]byte(tasksToolsJSON), &raws)
 	tools, err := federation.NormalizeTools(raws)
@@ -144,12 +150,15 @@ func tasksHarness(t *testing.T, u *tasksUpstream) *harness {
 		Auth: release.Auth{Mode: "api-key", APIKeys: []release.APIKey{
 			{ID: "k1", Subject: "svc-operator", Roles: []string{"operator"}, SHA256: identity.HashKey(operatorKey)},
 			{ID: "k2", Subject: "svc-viewer", Roles: []string{"viewer"}, SHA256: identity.HashKey(viewerKey)}}}}
+	if mutate != nil {
+		mutate(d)
+	}
 	env, err := release.Seal(d)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rec := &recorder{}
-	g := New(Config{GatewayID: "g1", Info: server.ServerInfo{Name: "gw", Version: "t"}, DevMode: true, CallTimeout: 2 * time.Second, Recorder: rec})
+	g := New(Config{GatewayID: "g1", Clients: clientsOrOpen(clients), Info: server.ServerInfo{Name: "gw", Version: "t"}, DevMode: true, CallTimeout: 2 * time.Second, Recorder: rec})
 	if err := g.Activate(env); err != nil {
 		t.Fatal(err)
 	}

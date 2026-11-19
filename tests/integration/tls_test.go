@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"idp-mcp/internal/admission"
 	"io"
 	"log/slog"
 	"net/http"
@@ -116,7 +117,7 @@ func TestTLSEverywhere(t *testing.T) {
 		PollInterval: 150 * time.Millisecond, HeartbeatInterval: 150 * time.Millisecond, Log: log}
 	rec := invocation.NewBatcher(sync.Sink(), log)
 	rec.Interval = 200 * time.Millisecond
-	g := gateway.New(gateway.Config{GatewayID: gid, Info: server.ServerInfo{Name: "gw", Version: "it"}, DevMode: true,
+	g := gateway.New(gateway.Config{GatewayID: gid, Clients: admission.Unrestricted(), Info: server.ServerInfo{Name: "gw", Version: "it"}, DevMode: true,
 		CallTimeout: 5 * time.Second, DriftInterval: 300 * time.Millisecond, Recorder: rec, Dropped: rec.Dropped, UpstreamTLS: upstreamTLS, Log: log})
 	sync.Gateway = g
 	runCtx, cancel := context.WithCancel(ctx)

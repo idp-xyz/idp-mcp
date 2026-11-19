@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"idp-mcp/internal/admission"
 	"io"
 	"net"
 	"net/http"
@@ -158,10 +159,10 @@ type harness struct {
 	srv *httptest.Server
 }
 
-func newHarness(t *testing.T, drift string) *harness {
+func newHarness(t *testing.T, drift string, clients ...*admission.Clients) *harness {
 	up := newUpstream(t)
 	rec := &recorder{}
-	g := New(Config{GatewayID: "g1", Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: "test"}, DevMode: true,
+	g := New(Config{GatewayID: "g1", Clients: clientsOrOpen(clients), Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: "test"}, DevMode: true,
 		CallTimeout: 2 * time.Second, Recorder: rec})
 	if err := g.Activate(buildRelease(t, up.srv.URL+"/mcp", drift, nil)); err != nil {
 		t.Fatal(err)
@@ -169,6 +170,15 @@ func newHarness(t *testing.T, drift string) *harness {
 	srv := httptest.NewServer(g.Handler())
 	t.Cleanup(srv.Close)
 	return &harness{g: g, up: up, rec: rec, srv: srv}
+}
+
+// clientsOrOpen is the clients of a test harness: the one given, else the deliberate opt-out, so that the tests
+// that are not about client admission run as the gateway did before it.
+func clientsOrOpen(c []*admission.Clients) *admission.Clients {
+	if len(c) > 0 {
+		return c[0]
+	}
+	return admission.Unrestricted()
 }
 
 const metaJSON = `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}`
@@ -472,7 +482,7 @@ func TestActivationRefusals(t *testing.T) {
 	if err := h.g.Activate(env); err == nil {
 		t.Fatal("tampered release activated")
 	}
-	prod := New(Config{GatewayID: "g1", DevMode: false})
+	prod := New(Config{GatewayID: "g1", Clients: admission.Unrestricted(), DevMode: false})
 	if err := prod.Activate(buildRelease(t, h.up.srv.URL+"/mcp", "block", nil)); err == nil {
 		t.Fatal("loopback target activated outside development mode")
 	}
@@ -522,7 +532,7 @@ func TestSpansCoverTheRequestAndTheUpstreamCall(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
 	up := newUpstream(t)
 	rec := &recorder{}
-	g := New(Config{GatewayID: "g1", Info: server.ServerInfo{Name: "gw", Version: "t"}, DevMode: true, CallTimeout: 2 * time.Second, Recorder: rec, Tracer: tp})
+	g := New(Config{GatewayID: "g1", Clients: admission.Unrestricted(), Info: server.ServerInfo{Name: "gw", Version: "t"}, DevMode: true, CallTimeout: 2 * time.Second, Recorder: rec, Tracer: tp})
 	if err := g.Activate(buildRelease(t, up.srv.URL+"/mcp", "block", nil)); err != nil {
 		t.Fatal(err)
 	}

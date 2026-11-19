@@ -687,6 +687,8 @@ type InvocationInput struct {
 	LatencyMS     int64     `json:"latencyMs"`
 	TraceID       string    `json:"traceId"`
 	ArgsDigest    string    `json:"argsDigest"`
+	Reason        string    `json:"reason"`
+	Bytes         int64     `json:"bytes"`
 }
 
 func nullable(s string) any {
@@ -694,6 +696,13 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nullableInt(n int64) any {
+	if n == 0 {
+		return nil
+	}
+	return n
 }
 
 // RecordInvocations stores a batch from a gateway.
@@ -707,13 +716,13 @@ func (s *Service) RecordInvocations(ctx context.Context, gatewayID, tenant strin
 			if r.Method == "" {
 				r.Method = "tools/call"
 			}
-			if r.At.IsZero() || r.Subject == "" || r.Tool == "" || len(r.Tool) > 2048 || len(r.Method) > 64 || (r.Decision != "ALLOW" && r.Decision != "DENY") {
+			if r.At.IsZero() || r.Subject == "" || r.Tool == "" || len(r.Tool) > 2048 || len(r.Method) > 64 || len(r.Reason) > 512 || r.Bytes < 0 || (r.Decision != "ALLOW" && r.Decision != "DENY") {
 				return fail(http.StatusBadRequest, "malformed invocation record")
 			}
-			b.Queue(`INSERT INTO invocations (tenant_id, gateway_id, at, release_digest, subject, auth_method, method, tool, target, decision, outcome, latency_ms, trace_id, args_digest, client, actor)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+			b.Queue(`INSERT INTO invocations (tenant_id, gateway_id, at, release_digest, subject, auth_method, method, tool, target, decision, outcome, latency_ms, trace_id, args_digest, client, actor, reason, bytes)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
 				tenant, gatewayID, r.At, r.ReleaseDigest, r.Subject, r.AuthMethod, r.Method, r.Tool, nullable(r.Target), r.Decision, r.Outcome, r.LatencyMS, nullable(r.TraceID), nullable(r.ArgsDigest),
-				nullable(r.Client), nullable(r.Actor))
+				nullable(r.Client), nullable(r.Actor), nullable(r.Reason), nullableInt(r.Bytes))
 		}
 		return tx.SendBatch(ctx, b).Close()
 	})
@@ -750,7 +759,7 @@ func (s *Service) ListAudit(ctx context.Context, p Principal) ([]AuditEvent, err
 func (s *Service) ListInvocations(ctx context.Context, p Principal) ([]Invocation, error) {
 	var out []Invocation
 	err := s.Store.InTenant(ctx, p.Tenant, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, gateway_id::text, at, release_digest, subject, client, actor, auth_method, method, tool, target, decision, outcome, latency_ms, trace_id, args_digest
+		rows, err := tx.Query(ctx, `SELECT id, gateway_id::text, at, release_digest, subject, client, actor, auth_method, method, tool, target, decision, outcome, latency_ms, trace_id, args_digest, reason, bytes
 			FROM invocations ORDER BY id DESC LIMIT 500`)
 		if err != nil {
 			return err
@@ -759,7 +768,7 @@ func (s *Service) ListInvocations(ctx context.Context, p Principal) ([]Invocatio
 		for rows.Next() {
 			var v Invocation
 			if err := rows.Scan(&v.ID, &v.GatewayID, &v.At, &v.ReleaseDigest, &v.Subject, &v.Client, &v.Actor, &v.AuthMethod, &v.Method, &v.Tool, &v.Target, &v.Decision,
-				&v.Outcome, &v.LatencyMS, &v.TraceID, &v.ArgsDigest); err != nil {
+				&v.Outcome, &v.LatencyMS, &v.TraceID, &v.ArgsDigest, &v.Reason, &v.Bytes); err != nil {
 				return err
 			}
 			out = append(out, v)

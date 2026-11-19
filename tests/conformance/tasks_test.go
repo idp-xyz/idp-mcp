@@ -108,7 +108,7 @@ func TestTasksExtensionConformance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := gateway.New(gateway.Config{GatewayID: "g", Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: "conformance"}, DevMode: true, CallTimeout: 130 * time.Second, Log: log})
+	g := gateway.New(gateway.Config{GatewayID: "g", Clients: runnerClients(t), Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: "conformance"}, DevMode: true, CallTimeout: 130 * time.Second, Log: log})
 	if err := g.Activate(env); err != nil {
 		t.Fatal(err)
 	}

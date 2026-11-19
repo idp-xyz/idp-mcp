@@ -262,3 +262,78 @@ M6、M7 改了转发路径（调用者转发与签名）之后，官方符合性
 - 契约 `idp.telos.mcp` 没有变：断言是 `_meta` 里的约定，不是 Release、Envelope 或 InvocationRecord 的一部分。
 
 **验证**：网关的单元测试 `TestForwardedIdentityIsSignedForTheTargetAndTheRequest`（上游用公钥验得过；`aud` 是端点、`req` 是上游实际收到的请求的摘要、有效期 60 秒、每次调用一个新的断言；客户端伪造的断言被换掉）、`TestNoAssertionWithoutApprovalAndAForgedOneIsStripped`、`TestCallerSignerTakesOnlyAP256Key`、`TestRequestDigestIsTheOneUpstreamsCompute`（同一个请求换一种写法摘要不变；这个请求与摘要也钉在 idp-sandbox 的测试里，连同本签名器为它签出的一个断言）。端到端：idp-sandbox 的 `deploy/e2e.sh`（真实的注册服务与网关，网关带密钥，沙箱只认签名）全部检查通过，沙箱网络上一个不经网关、自称 `agent-host` 的直接调用得到 403。
+
+## 14. M8：外部客户端的准入（2026-11-19，契约 1.2.0）
+
+起因：agent 运行时（idp-host）对"对外"的工具做三件事：成员确认、数据的敏感级别上限、把工具结果标为不可信。一个直连网关的客户端三样都没有，而网关此前只按角色授权：只要它的用户的角色允许 `web__web_open_url`，它就能调用（平台 ADR `idp-mcp-external-interop` 的缺口 C3、C4、C8，决策 D-X6 到 D-X8；本节是其中的步骤 X3，不含桥，也不含"上游的类别"，后者是 X1）。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| D46 | **按客户端授权，缺省什么都看不到**。令牌里的 OAuth 客户端是 `azp`（Keycloak 签发时写入，客户端自己改不了；`client_id` 不读，一个声明一个含义）。新的必填设置 `IDP_GATEWAY_CLIENTS_FILE`（YAML 或 JSON）列出网关服务的客户端，每个是 `platform`（平台自己的：角色允许什么就看见什么，同此前）或 `external`（外部的：必须写明 `servers` 和/或 `tools`）。**工具、prompt、资源对一次调用可见、可用，要同时满足角色允许、客户端允许**。没列出的客户端、没有 `azp` 的令牌：通过认证，什么都看不到、什么都用不了，并且每次都进审计。**网关没有这个文件就不启动**，错误信息写出设置名和唯一的出路：条目 `"*": platform`，它服务每一个客户端，等于关掉这项控制，网关启动时为它写一条告警。文件里的未知字段、非法的模式、种类或名字都使启动失败。API Key 没有 OAuth 客户端，它的客户端是 `api-key:<密钥 id>`，运维像别的客户端一样列出 | 控制是否生效不能取决于运维记得写一份配置：缺省关闭（所有客户端都服务）是此前的行为，也正是缺口；缺省打开而启动时拒绝，才能让"忘了配置"变成一眼可见的失败。关掉只能是运维写下的一行字。拼错字段名同样会悄悄关掉控制，所以未知字段是错误。**否决的做法**：按令牌的 scope 区分（scope 由客户端自己请求，客户端标识由 Keycloak 绑定到注册的客户端上）；用客户端 id 的前缀（`idp-*`）推断平台客户端（命名不是授权）；只告警不拒绝启动（控制悄悄不生效）；读 `client_id` 作为后备 |
+| D47 | **没列出的客户端收到什么**：`tools/list`、`prompts/list`、`resources/list`、`resources/templates/list` 是 HTTP 200 的空列表；`tools/call`、`prompts/get`、`resources/read`、`completion/complete` 是与"工具不存在"逐字相同的 JSON-RPC 错误（`-32602`，HTTP 200；D5 的"一个应答"：不能靠拒绝的差别枚举目录），`tasks/*` 是"未知任务"；`server/discover` 只给最小的能力集；`subscriptions/listen` 得到一个什么都不接受的确认和流的结束（不占流的名额）。**不用 401 或 403**：401 带 `WWW-Authenticate`，会让 MCP 客户端重新走授权流程，而它的凭据本来没问题。外部客户端的 `servers` 授予该服务器的工具、prompts、resources；`tools`（`path.Match` 模式，对外暴露的工具名，与 HOST 的 `externalTools`、`confirmTools` 同一种写法与校验）只授予工具，prompts 与 resources 只能按服务器授予。task 记下创建它的客户端，只有这个客户端能用这个 task id（同一个成员的另一个客户端得到"未知任务"） | 角色过滤的每一条路径（见下面的清单）都经 `internal/authorization`，客户端的规则加在那里，所以不会有哪条路径忘了它。统一的"空或不存在"让没列出的客户端无从知道网关服务什么 |
+| D48 | **只许 HOST 的工具**。设置 `hostOnlyTools`（工具名模式）列出只有 HOST 能调用的工具；HOST 是客户端文件里写了 `host: true` 的平台客户端。这样的工具对其他一切客户端（平台的或外部的，不论角色、不论白名单）既不可见也不可调。**网关不内置任何缺省模式**（平台的部署写 `["web__*"]`）。判定写成"来自两个来源之一"：文件里的模式，和 Release 对整个目标的声明（`authorization.hostOnlyByRelease`，现在恒为否；X1 在这里加"所有外部上游的工具"，不用改别处）。运维的例外 `hostOnlyExcept`（模式加必填的理由，理由有长度上限）对两个来源都有效；**每次使用例外，审计记录的 `reason` 是 `host-only exception: <理由>`**，HOST 自己的调用不算使用例外。例外只解除"只许 HOST"，不扩大任何客户端的白名单 | 成员确认、敏感级别上限、不可信标记都在 HOST 里，绕过 HOST 就绕过它们（C8）；"该不该加这一道"是部署的事，所以模式由部署给。**否决的做法**：把标记写进 Release 的每个工具（要改 Release 的契约与审批，X1 才有意义）；缺省内置 `web__*`（网关不应知道哪个上游是 web）。**与平台决策的差别**：D-X7 写"缺省标上 `web__*` 与所有外部上游的工具"；这里按任务的要求不内置模式，"所有外部上游"留给 X1。`hostOnlyTools` 的模式只管工具；一个目标的 prompts 与 resources 只有在 Release 对整个目标声明时才是"只许 HOST"（见没有做的） |
+| D49 | **限流与审计补全（C4）**。限流：每个客户端一个窗口、每个成员（租户加 subject）一个窗口，滑动窗口，在内存里，**每个副本各自计数**（与 idp-web 相同；多个副本时实际上限是副本数乘以设置值，重启忘记窗口）。设置 `rateLimits.perClient`、`rateLimits.perSubject`（`requests`、`window`；缺省 600 与 120 每分钟）。**缺省只套在外部客户端和没列出的客户端上；平台客户端缺省没有限制**，它的成员也没有：HOST 一个客户端替所有成员调用，服务账号（如 EER 的）在一个 subject 下跑很多次执行，对它们套对外开放用的阈值会让平台自己被限流。客户端条目可以设自己的上限：`rateLimit`（这个客户端每个窗口的请求数）与 `subjectRateLimit`（经它来的每个成员的上限），外部客户端用它覆盖缺省，平台客户端用它给自己加上限。没列出的客户端永远受缺省限制（它什么都得不到，但不能随意冲击网关和审计）。通配 `"*"` 是平台条目，所以不限流。每个通过认证的请求都计数，被拒绝的请求也计；超限得到 HTTP 429、`Retry-After`（秒）和 JSON-RPC `-32029`（数据里有 `retryAfterSeconds`），并进审计。审计补全：列表调用、订阅、认证失败、限流都有记录（此前没有：只有 `tools/call`、`prompts/get`、`resources/read`、`completion/complete`、`tasks/*` 有）；流式的应答记两条，流打开时一条（`STREAM_STARTED`），结束时一条（`STREAMED`，带时长和转发的字节数）；订阅同理。形式不变：仍是 `InvocationRecord`，仍不记令牌和参数。新增两个可选字段 `reason`（拒绝的原因，或例外的理由）和 `bytes`，三个新的结果（`STREAM_STARTED`、`RATE_LIMITED`、`UNAUTHENTICATED`）和六个新的方法名（四个列表、`subscriptions/listen`、`server/discover`，后者只在被拒绝时记）。未认证的请求记为主体 `(none)`；没有单个对象的记录的 `tool` 是 `*`。认证失败的记录每个来源地址每分钟最多 30 条，多出的只计入指标 `idp_mcp_gateway_auth_failures_total`（没有凭据的人不能用它灌满审计缓冲） | 对外开放后，限流和完整的审计是基本要求。每个副本各自计数不需要新的依赖，也不增加一个共享状态的故障点；代价是上限不精确，写在这里。**否决的做法**：只数 `tools/call`（探测哪些东西可用同样要限制）；共享计数（Redis 或 PostgreSQL，为一个防失控的阈值增加依赖）；另开一条审计流（运维要多看一处）；每次认证失败都记（审计被无凭据的人灌满） |
+
+**契约**：`idp.telos.mcp` 1.1.0 → **1.2.0**，只有向后兼容的新增（上面的两个字段、三个结果、六个方法名）。迁移 `0008_invocation_reason_bytes.sql`。`idp-contracts/idp.telos.mcp/1.2.0` 的发布副本要与 `api/contracts/` 逐字节相同（在那个仓库里放，不在这里）。
+
+**角色过滤的每一条路径，现在都按客户端再过滤一次**：`tools/list`（`mcp.go` 的 `VisibleTools`）、`tools/call`（`Decide`）、`prompts/list`（`AllowedPrompt`）、`prompts/get` 与 `completion/complete` 的 prompt 引用（`promptOwner`）、`resources/list`、`resources/templates/list`（`AllowedResources`）、`resources/read` 与 `completion/complete` 的资源引用与 `subscriptions/listen` 的资源订阅（`resourceOwner` 经 `ResourceTargets`）、`subscriptions/listen` 的 prompts 与 tools 的 list_changed（`PromptTargets`；tools 的通知只发给被服务的客户端）、tasks（`tasks/get|update|cancel` 与 listen 的 `taskIds`，经 `taskStore.lookup` 的创建者客户端）、`server/discover`。这些都经 `internal/authorization` 的同一个策略对象，客户端的规则在那里。
+
+**升级说明**：
+1. **网关不再在没有客户端文件时启动**。升级前先写好文件：平台部署至少要列出 HOST（`idp-host`，`host: true`）和其他调用网关的平台客户端，再加 `hostOnlyTools: ["web__*"]`；想先保持原来的行为，写 `clients: {"*": platform}`（控制关闭，启动告警）。例子见 README"客户端准入"；compose 与 Kubernetes 的配置见 `deploy/e2e.sh` 与 `deploy/kubernetes/gateway.yaml`。
+2. **先升级注册服务（迁移 `0008`），再升级网关**。注册服务按 `DisallowUnknownFields` 解码网关推来的调用记录：新网关推 `reason` 与 `bytes` 给旧注册服务，整批被拒（400），网关保留该批重试，记录就堵在缓冲里。
+3. 使用 API Key 数据面的部署，客户端 id 是 `api-key:<密钥 id>`，要列出，或写 `"*"`。
+4. 受影响的现有检查：见平台一侧的清单（报告），主要是直接用令牌调网关的验收脚本。
+
+**没有做的**：
+- 旧版本协议的外部客户端（C1）：等有了要接的客户端清单再定；做的话与桥对称，核心仍只说新版本。
+- 浏览器里的客户端（C6）：不支持，网关不开 CORS。
+- 动态客户端注册：不开放；外部客户端在 Keycloak 里由运维注册，再写进客户端文件。
+- 每个成员各自的第三方凭据（平台决策的选择点 2）：不在这一批。
+- "所有外部上游的工具缺省只许 HOST"：X1 加上游的类别后，在 `hostOnlyByRelease` 里实现；本批只有挂载点和针对它的测试（`TestEverythingOfAHostOnlyTargetIsHostOnlyWhenTheReleaseSaysSo`）。
+- `hostOnlyTools` 不管 prompts 和 resources；这些对 HOST 以外的客户端仍按 `servers` 与角色决定。
+- 成功的 `server/discover` 不进审计（只有被拒绝的：认证失败、限流）。
+- 列表的审计记录不含返回了多少项。
+- 限流不跨副本；窗口不持久。
+- 客户端文件只在启动时读，改动要重启（Kubernetes 里是滚动重启）。
+
+**验证**（2026-11-19，WSL）：
+- 单元与网关的测试：未列出的客户端（空列表、调用被拒、审计）、有白名单的外部客户端、平台客户端、"只许 HOST"（HOST 可见可调，其余不可见不可调）、例外与它的审计理由、prompts/resources/completion/tasks/subscriptions 同样按客户端、网关与注册服务的启动失败信息、`"*"` 的出路、限流（每客户端、每成员、`Retry-After`、覆盖、没列出的客户端也限）、补全后的审计（列表、订阅、认证失败及其上限、流的两条记录与字节数）。真实的 JWT（本地 JWKS）证明 `azp` 是客户端、没有 `azp` 的令牌不被服务。
+- `make test`（含 `-race`）、`make test-integration`（真实 PostgreSQL：迁移 `0008` 应用，认证失败与列表记录经注册服务存下并读回）全部通过。
+- 官方符合性：37/37 个计分场景通过，官方 tasks 扩展 8/8（符合性测试的客户端是一个平台客户端，不是 `"*"`）。
+- compose 端到端（本仓库的 `deploy/e2e.sh`）：`MODE=apikey` 13/13，`MODE=jwt` 25/25 检查（新增：平台客户端看不到只许 HOST 的工具并被拒，HOST 可以，外部客户端只有白名单，没列出的客户端什么都没有，注册服务里的调用记录写明原因），`MODE=oidc` 12/12（`agent-app` 平台、`agent-exchange` 为 HOST，审计的 client 与 actor 不变）。
+
+**反向验证**：每个控制手工去掉一次，对应的测试失败，再恢复：
+
+| 去掉的控制 | 失败的测试（节选） |
+|---|---|
+| 没列出的客户端也被服务（`lookup` 对未知客户端回退成平台客户端） | `TestAnUnlistedClientSeesNoToolsAndEveryCallIsRefusedAndAudited`、`TestATokenWithoutAClientIsNotListed`、`TestAToolNeedsTheRoleAndTheClient`（共 15 个） |
+| 没有客户端文件的策略服务所有人（nil 不是"不服务"） | `TestAPolicyCompiledWithoutClientsGrantsNothing`、`TestNothingIsServedWithoutAFile` |
+| 外部客户端的白名单不起作用 | `TestAnExternalClientSeesAndCallsOnlyWhatItsAllowListNames`、`TestDecideCombines…`（共 6 个） |
+| "只许 HOST"不起作用 | `TestAHostOnlyToolIsVisibleAndCallableForTheHostClientOnly`、`TestAnExternalClientsOwnPatternDoesNotLiftHostOnly`（共 5 个） |
+| 例外匹配所有工具 | `TestAHostOnlyExceptionLetsOtherClientsThroughAndIsAuditedWithItsReason`、`TestDecideCombines…` |
+| 例外的使用不记理由 | `TestAHostOnlyExceptionLetsOtherClientsThroughAndIsAuditedWithItsReason` |
+| 例外可以不写理由 | `TestInvalidFilesAreRefusedWithAMessageThatNamesTheProblem` |
+| 配置里的未知字段被接受（拼错的 `hostOnlyTool` 让控制失效） | `TestInvalidFilesAreRefusedWithAMessageThatNamesTheProblem` |
+| prompts 不按客户端过滤 | `TestPromptsAndResourcesFollowTheClientToo`、`TestAnUnlistedClientGetsEmptyPromptAndResourceListsAndNoCapabilities`（共 4 个） |
+| resources 不按客户端过滤 | `TestPromptsAndResourcesFollowTheClientToo`、`TestSubscriptionsHonourOnlyWhatTheClientMaySee`（共 5 个） |
+| completion 与订阅用的 prompt 目标不按客户端过滤 | `TestPromptsAndResourcesFollowTheClientToo`、`TestSubscriptionsHonourOnlyWhatTheClientMaySee` |
+| task 不绑定创建它的客户端 | `TestATaskBelongsToTheClientThatCreatedIt` |
+| 没列出的客户端的订阅被接受 | `TestSubscriptionsHonourOnlyWhatTheClientMaySee` |
+| `server/discover` 对没列出的客户端给全部能力 | `TestAnUnlistedClientGetsEmptyPromptAndResourceListsAndNoCapabilities` |
+| 平台客户端也受缺省限流 | `TestPlatformClientsAreNotLimitedUnlessTheFileSaysSoAndOthersAre`、`TestPlatformClientsAndTheirSubjectsAreNotLimitedByTheDefaults` |
+| 没列出的客户端不限流 | `TestAnUnlistedClientIsAlwaysLimitedByTheDefaults`、`TestPlatformClientsAreNotLimitedUnlessTheFileSaysSoAndOthersAre` |
+| 每个客户端的限流去掉 | `TestTheRequestLimitOfAnExternalClientRefusesWithRetryAfterAndIsAudited`、`TestAClientsOwnRateLimitOverridesTheDefaultsForPlatformAndExternalClients`、`TestAnUnlistedClientIsAlwaysLimitedByTheDefaults` |
+| 每个成员的限流去掉 | `TestTheRequestLimitOfASubjectCountsAcrossClientsWhenAPlatformEntrySetsOne` |
+| 限流的拒绝不带 `Retry-After` | `TestTheRequestLimitOfAnExternalClientRefusesWithRetryAfterAndIsAudited` |
+| 限流的拒绝不进审计 | `TestTheRequestLimitOfAnExternalClientRefusesWithRetryAfterAndIsAudited`、`TestTheRequestLimitOfASubjectCountsAcrossClientsWhenAPlatformEntrySetsOne` |
+| 限流窗口不滑动（或把被拒的请求也计入） | `TestTheLimiterSlidesRefusesWithTheWaitAndKeepsKeysApart`、`TestTheRequestLimitOfAnExternalClientRefusesWithRetryAfterAndIsAudited` |
+| 列表调用不记审计 | `TestListCallsAreRecordedForListedClientsToo`、`TestAnUnlistedClientSeesNoToolsAndEveryCallIsRefusedAndAudited` |
+| 认证失败不记审计 | `TestAuthenticationFailuresAreRecordedWithoutTheCredential`、`TestAFloodOfRefusedCredentialsFromOneAddressIsCountedButNotAllRecorded` |
+| 认证失败的审计不设上限 | `TestAFloodOfRefusedCredentialsFromOneAddressIsCountedButNotAllRecorded` |
+| 流的开始不记 | `TestAStreamedCallRecordsItsStartItsEndAndItsBytes`、`TestASubscriptionRecordsItsOpeningAndItsEndWithBytes` |
+| 流的字节数不记 | 同上两个 |
+| 订阅的字节数不记 | `TestASubscriptionRecordsItsOpeningAndItsEndWithBytes` |
+| API Key 不是自己的客户端 | `TestAPrincipalWithAnAPIKeyIsTheClientNamedAfterTheKey`、`TestAnAPIKeyIsTheClientNamedAfterItsID`（共 16 个） |
+| `azp` 不当作客户端读 | `TestTheClientOfATokenIsItsAzpAndATokenWithoutOneHasNone`、`TestATokenWithoutAClientIsNotListed`、`TestValidTokensRSAAndECWithRotation` |
+| 启动时不检查客户端文件 | `TestTheGatewayDoesNotStartWithoutTheClientsFile` |
+| 注册服务丢掉 `reason` 与 `bytes` | `TestControlPlaneToDataPlane`（集成测试） |

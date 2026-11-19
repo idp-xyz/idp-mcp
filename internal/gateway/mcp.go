@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"idp-mcp/adapters/identity"
+	"idp-mcp/internal/admission"
 	"idp-mcp/internal/authorization"
 	"idp-mcp/internal/client"
 	"idp-mcp/internal/federation"
@@ -163,7 +166,7 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError, Message: "Gateway has no active release"})
 		return
 	}
-	pr, ok := g.authenticate(w, r, st, req.ID)
+	pr, ok := g.authenticate(w, r, st, req)
 	if !ok {
 		return
 	}
@@ -172,16 +175,25 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	if !g.withinLimits(w, st, req, pr) {
+		return
+	}
 	switch req.Method {
 	case "server/discover":
-		transport.WriteResult(w, req.ID, server.DiscoverResultWith(g.cfg.Info, federatedCapabilities(st.doc)))
+		caps := federatedCapabilities(st.doc)
+		if !st.policy.Listed(pr) { // what the server offers is not told to a client it does not serve
+			caps = map[string]any{"tools": map[string]any{"listChanged": true}}
+		}
+		transport.WriteResult(w, req.ID, server.DiscoverResultWith(g.cfg.Info, caps))
 	case "tools/list":
+		rec := g.recorder(r, st, pr, req, invocation.Whole)
 		var tools []server.Tool
 		for _, pair := range st.policy.VisibleTools(pr) {
 			if rt, ok := st.router.Route(pair[0], pair[1]); ok {
 				tools = append(tools, rt.Listed())
 			}
 		}
+		rec.doneList(st, pr)
 		transport.WriteResult(w, req.ID, server.ToolsListResult(tools, g.cfg.Info))
 	case "tools/call":
 		g.toolsCall(w, r, st, req, pr)
@@ -206,18 +218,67 @@ func (g *Gateway) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, st *state, id json.RawMessage) (authorization.Principal, bool) {
+// authenticate admits the bearer credential or answers 401. A refused credential is audited with the gateway's
+// own words for the cause and nothing of the credential; a source that fails over and over is audited only up
+// to authFailureRecords a minute (the rest are counted in the metrics), so that the audit cannot be flooded
+// by someone with no credential at all.
+func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, st *state, req *server.Request) (authorization.Principal, bool) {
 	tok, err := identity.Bearer(r)
 	var pr authorization.Principal
 	if err == nil {
 		pr, err = st.auth.Authenticate(r.Context(), tok)
 	}
 	if err != nil {
+		g.authFailures.Inc()
+		host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
+		if splitErr != nil {
+			host = r.RemoteAddr
+		}
+		if g.limiter.Allow("authfail\x00"+host, admission.Limit{Requests: authFailureRecords, Window: time.Minute}) == 0 {
+			reason := "the credential was refused"
+			if errors.Is(err, identity.ErrNoCredentials) {
+				reason = "no bearer credential"
+			}
+			now := time.Now()
+			g.cfg.Recorder.Record(invocation.Record{At: now.UTC(), ReleaseDigest: st.env.Digest, Subject: invocation.NoSubject, AuthMethod: st.doc.Auth.Mode,
+				Method: req.Method, Tool: invocation.Whole, Decision: invocation.Deny, Outcome: invocation.OutcomeUnauthorized, Reason: reason,
+				TraceID: observability.TraceID(r.Context())})
+		}
 		w.Header().Set("WWW-Authenticate", st.auth.Challenge(!errors.Is(err, identity.ErrNoCredentials)))
-		transport.WriteError(w, http.StatusUnauthorized, id, &server.Error{Code: server.CodeInvalidRequest, Message: "Unauthorized"})
+		transport.WriteError(w, http.StatusUnauthorized, req.ID, &server.Error{Code: server.CodeInvalidRequest, Message: "Unauthorized"})
 		return pr, false
 	}
 	return pr, true
+}
+
+// authFailureRecords is how many refused credentials of one source address are written to the audit each minute.
+const authFailureRecords = 30
+
+// withinLimits applies the request limits of the caller's client and of the caller's subject (ADR-0001 D49) and
+// answers 429 with Retry-After, and a record, when either is exhausted. Every authenticated request counts,
+// refused ones too, so that probing for what is allowed is limited like using it.
+func (g *Gateway) withinLimits(w http.ResponseWriter, st *state, req *server.Request, pr authorization.Principal) bool {
+	client := pr.ClientID()
+	var wait time.Duration
+	which := "client"
+	if lim, limited := g.cfg.Clients.ClientLimit(client); limited {
+		wait = g.limiter.Allow("client\x00"+client, lim)
+	}
+	if lim, limited := g.cfg.Clients.SubjectLimit(client); wait == 0 && limited {
+		wait = g.limiter.Allow("subject\x00"+pr.Tenant+"\x00"+pr.Subject, lim)
+		which = "subject"
+	}
+	if wait == 0 {
+		return true
+	}
+	secs := int((wait + time.Second - 1) / time.Second)
+	g.cfg.Recorder.Record(invocation.Record{At: time.Now().UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject, Client: pr.Client, Actor: pr.Actor,
+		AuthMethod: pr.Method, Method: req.Method, Tool: invocation.Whole, Decision: invocation.Deny, Outcome: invocation.OutcomeRateLimited,
+		Reason: fmt.Sprintf("%s rate limit; retry after %ds", which, secs)})
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	transport.WriteError(w, http.StatusTooManyRequests, req.ID, &server.Error{Code: server.CodeRateLimited,
+		Message: fmt.Sprintf("Rate limit exceeded for this %s: retry after %d seconds", which, secs), Data: map[string]any{"retryAfterSeconds": secs}})
+	return false
 }
 
 type callParams struct {
@@ -226,7 +287,6 @@ type callParams struct {
 }
 
 func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, pr authorization.Principal) {
-	start := time.Now()
 	if rej := req.CheckNameHeader(r.Header.Get(server.HeaderName)); rej != nil {
 		transport.WriteRejection(w, rej)
 		return
@@ -236,33 +296,36 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 		transport.WriteError(w, http.StatusBadRequest, req.ID, err.(*server.Error))
 		return
 	}
-	span := trace.SpanFromContext(r.Context())
-	span.SetAttributes(attribute.String("mcp.tool", p.Name))
-	rec := invocation.Record{At: start.UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject, Client: pr.Client, Actor: pr.Actor, AuthMethod: pr.Method,
-		Method: req.Method, Tool: p.Name, TraceID: observability.TraceID(r.Context())}
+	trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("mcp.tool", p.Name))
+	rec := g.recorder(r, st, pr, req, p.Name)
 	if len(p.Arguments) > 0 {
-		rec.ArgsDigest, _ = release.Digest(p.Arguments)
-	}
-	done := func(decision, outcome string) {
-		rec.Decision, rec.Outcome, rec.LatencyMS = decision, outcome, time.Since(start).Milliseconds()
-		span.SetAttributes(attribute.String("idp.decision", decision), attribute.String("idp.outcome", outcome), attribute.String("idp.target", rec.Target))
-		g.cfg.Recorder.Record(rec)
+		rec.rec.ArgsDigest, _ = release.Digest(p.Arguments)
 	}
 	rt, found := st.router.Lookup(p.Name)
-	if !found || !st.policy.Allowed(pr, rt.Target, rt.Tool.Name) {
-		done(invocation.Deny, invocation.OutcomeDenied)
+	var dec authorization.Decision
+	if found {
+		dec = st.policy.Decide(pr, rt.Target, rt.Tool.Name)
+	}
+	if !found || !dec.Allowed {
+		if !found {
+			rec.reason(g.refusal(st, pr, ""))
+		}
+		rec.reason(dec.Why)
+		rec.done("", invocation.Deny, invocation.OutcomeDenied)
 		transport.WriteError(w, http.StatusOK, req.ID, server.UnknownTool(p.Name))
 		return
 	}
-	rec.Target = rt.Target
+	if dec.Exception != "" {
+		rec.reason("host-only exception: " + dec.Exception)
+	}
 	if st.blocked(rt.Target) {
-		done(invocation.Allow, invocation.OutcomeNotDelivered)
+		rec.done(rt.Target, invocation.Allow, invocation.OutcomeNotDelivered)
 		transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError,
 			Message: "Tool temporarily unavailable: the upstream catalog changed since approval"})
 		return
 	}
 	if err := st.args.Validate(p.Name, p.Arguments); err != nil {
-		done(invocation.Deny, invocation.OutcomeInvalidArgs)
+		rec.done(rt.Target, invocation.Deny, invocation.OutcomeInvalidArgs)
 		transport.WriteError(w, http.StatusOK, req.ID, &server.Error{Code: server.CodeInvalidParams, Message: "Invalid arguments for tool " + p.Name,
 			Data: map[string]string{"reason": err.Error()}})
 		return
@@ -273,8 +336,7 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 	if targetHas(st.doc, rt.Target, release.CapTasks) {
 		observe = func(msg json.RawMessage) { g.tasks.bindFromResult(msg, rt.Target, p.Name, pr) }
 	}
-	outcome := g.forward(w, r, st, req, rt.Endpoint, rt.Tool.Name, params, observe)
-	done(invocation.Allow, outcome)
+	rec.done(rt.Target, invocation.Allow, g.forward(w, r, st, req, rt.Endpoint, rt.Tool.Name, params, rec.to(rt.Target), observe))
 }
 
 // forward sends the request to the upstream with the given (possibly rewritten) params and relays
@@ -283,7 +345,7 @@ func (g *Gateway) toolsCall(w http.ResponseWriter, r *http.Request, st *state, r
 // are, so multi-round flows (InputRequiredResult) work end to end. observe, if given, sees the
 // final JSON-RPC message (the JSON body, or the last message of a stream that fit in memory).
 func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, endpoint, nameHeader string,
-	params map[string]json.RawMessage, observe ...func(json.RawMessage)) (outcome string) {
+	params map[string]json.RawMessage, rec *callRecord, observe ...func(json.RawMessage)) (outcome string) {
 	var seen func(json.RawMessage)
 	if len(observe) > 0 {
 		seen = observe[0]
@@ -366,6 +428,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(resp.StatusCode)
+		rec.started()
 		rc := http.NewResponseController(w)
 		buf := make([]byte, 32<<10)
 		var tee []byte // bounded copy for observe
@@ -376,6 +439,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 				if _, werr := w.Write(buf[:n]); werr != nil {
 					return invocation.OutcomeUnknown
 				}
+				rec.relayed(n)
 				_ = rc.Flush()
 				if seen != nil && !overflow {
 					if len(tee)+n > MaxObservedStream {

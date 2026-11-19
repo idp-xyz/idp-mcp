@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"idp-mcp/internal/admission"
 	"idp-mcp/internal/authorization"
 	"idp-mcp/internal/invocation"
 	"idp-mcp/internal/observability"
@@ -104,7 +105,9 @@ func rawParams(req *server.Request) map[string]json.RawMessage {
 	return params
 }
 
-func (g *Gateway) promptsList(w http.ResponseWriter, _ *http.Request, st *state, req *server.Request, pr authorization.Principal) {
+func (g *Gateway) promptsList(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, pr authorization.Principal) {
+	rec := g.recorder(r, st, pr, req, invocation.Whole)
+	defer rec.doneList(st, pr)
 	var out []server.Prompt
 	for _, t := range st.doc.Targets {
 		if !t.HasCapability(release.CapPrompts) {
@@ -130,17 +133,90 @@ func (g *Gateway) promptOwner(st *state, pr authorization.Principal, exposed str
 	return rt.Target, rt.Prompt.Name, true
 }
 
-func (g *Gateway) recorder(r *http.Request, st *state, pr authorization.Principal, req *server.Request, name string) func(target, decision, outcome string) {
+// callRecord is the audit record of one request while it is decided. A request that is refused, or answered
+// in one piece, is recorded once, by done; one answered with an event stream is recorded twice, by started when
+// the stream opens and by done when it ends, with its duration and the bytes relayed (ADR-0001 D49).
+type callRecord struct {
+	g     *Gateway
+	rec   invocation.Record
+	start time.Time
+	span  trace.Span
+	tgt   string // the target the request is routed to, once known: a stream's first record names it
+}
+
+// to sets the target the request is routed to and returns c, for the forward call.
+func (c *callRecord) to(target string) *callRecord {
+	c.tgt = target
+	return c
+}
+
+// promptTarget is the target that pins the exposed prompt name, whoever may use it; empty if none does.
+func (g *Gateway) promptTarget(st *state, exposed string) string {
+	if rt, ok := st.router.LookupPrompt(exposed); ok {
+		return rt.Target
+	}
+	return ""
+}
+
+func (g *Gateway) recorder(r *http.Request, st *state, pr authorization.Principal, req *server.Request, name string) *callRecord {
 	start := time.Now()
 	span := trace.SpanFromContext(r.Context())
 	span.SetAttributes(attribute.String("mcp.name", name))
-	rec := invocation.Record{At: start.UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject, Client: pr.Client, Actor: pr.Actor, AuthMethod: pr.Method,
-		Method: req.Method, Tool: name, TraceID: observability.TraceID(r.Context())}
-	return func(target, decision, outcome string) {
-		rec.Target, rec.Decision, rec.Outcome, rec.LatencyMS = target, decision, outcome, time.Since(start).Milliseconds()
-		span.SetAttributes(attribute.String("idp.decision", decision), attribute.String("idp.outcome", outcome), attribute.String("idp.target", target))
-		g.cfg.Recorder.Record(rec)
+	return &callRecord{g: g, start: start, span: span, rec: invocation.Record{At: start.UTC(), ReleaseDigest: st.env.Digest, Subject: pr.Subject,
+		Client: pr.Client, Actor: pr.Actor, AuthMethod: pr.Method, Method: req.Method, Tool: name, TraceID: observability.TraceID(r.Context())}}
+}
+
+// reason sets the record's reason; the first one set stands.
+func (c *callRecord) reason(why string) {
+	if c.rec.Reason == "" {
+		c.rec.Reason = why
 	}
+}
+
+// started records that the answer is an event stream; the call has been allowed and delivered.
+func (c *callRecord) started() {
+	if c == nil {
+		return
+	}
+	s := c.rec
+	s.Target, s.Decision, s.Outcome, s.LatencyMS = c.tgt, invocation.Allow, invocation.OutcomeStreamStarted, 0
+	c.g.cfg.Recorder.Record(s)
+}
+
+// relayed counts bytes of an event stream passed on.
+func (c *callRecord) relayed(n int) {
+	if c != nil {
+		c.rec.Bytes += int64(n)
+	}
+}
+
+func (c *callRecord) done(target, decision, outcome string) {
+	c.rec.Target, c.rec.Decision, c.rec.Outcome, c.rec.LatencyMS = target, decision, outcome, time.Since(c.start).Milliseconds()
+	c.span.SetAttributes(attribute.String("idp.decision", decision), attribute.String("idp.outcome", outcome), attribute.String("idp.target", target))
+	c.g.cfg.Recorder.Record(c.rec)
+}
+
+// doneList records a list request: allowed for a listed client, refused (and answered with an empty list) for
+// one that is not listed, so that the audit shows who asked what the gateway does not serve them.
+func (c *callRecord) doneList(st *state, pr authorization.Principal) {
+	if st.policy.Listed(pr) {
+		c.done("", invocation.Allow, invocation.OutcomeOK)
+		return
+	}
+	c.reason(admission.NotListed)
+	c.done("", invocation.Deny, invocation.OutcomeDenied)
+}
+
+// refusal is the reason a prompt, resource or task of target was not available to pr when the role did not
+// say so: the client's, if it is the client that refuses. target is empty when nothing resolved.
+func (g *Gateway) refusal(st *state, pr authorization.Principal, target string) string {
+	if !st.policy.Listed(pr) {
+		return admission.NotListed
+	}
+	if target != "" {
+		return st.policy.ClientWhy(pr, target)
+	}
+	return ""
 }
 
 func (g *Gateway) promptsGet(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, pr authorization.Principal) {
@@ -152,25 +228,28 @@ func (g *Gateway) promptsGet(w http.ResponseWriter, r *http.Request, st *state, 
 		Name string `json:"name"`
 	}
 	_ = req.DecodeParams(&p)
-	done := g.recorder(r, st, pr, req, p.Name)
+	rec := g.recorder(r, st, pr, req, p.Name)
 	target, native, ok := g.promptOwner(st, pr, p.Name)
 	if !ok {
-		done("", invocation.Deny, invocation.OutcomeDenied)
+		rec.reason(g.refusal(st, pr, g.promptTarget(st, p.Name)))
+		rec.done("", invocation.Deny, invocation.OutcomeDenied)
 		transport.WriteError(w, http.StatusOK, req.ID, &server.Error{Code: server.CodeInvalidParams, Message: "Unknown prompt: " + p.Name})
 		return
 	}
 	if st.blocked(target) {
-		done(target, invocation.Allow, invocation.OutcomeNotDelivered)
+		rec.done(target, invocation.Allow, invocation.OutcomeNotDelivered)
 		transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError,
 			Message: "Prompt temporarily unavailable: the upstream catalog changed since approval"})
 		return
 	}
 	params := rawParams(req)
 	params["name"], _ = json.Marshal(native)
-	done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), native, params))
+	rec.done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), native, params, rec.to(target)))
 }
 
-func (g *Gateway) resourcesList(w http.ResponseWriter, _ *http.Request, st *state, req *server.Request, pr authorization.Principal, templates bool) {
+func (g *Gateway) resourcesList(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, pr authorization.Principal, templates bool) {
+	rec := g.recorder(r, st, pr, req, invocation.Whole)
+	defer rec.doneList(st, pr)
 	items := []any{}
 	for _, t := range st.doc.Targets {
 		if !t.HasCapability(release.CapResources) || !st.policy.AllowedResources(pr, t.Name) {
@@ -228,20 +307,21 @@ func (g *Gateway) resourcesRead(w http.ResponseWriter, r *http.Request, st *stat
 		URI string `json:"uri"`
 	}
 	_ = req.DecodeParams(&p)
-	done := g.recorder(r, st, pr, req, p.URI)
+	rec := g.recorder(r, st, pr, req, p.URI)
 	target, ok := g.resourceOwner(st, pr, p.URI)
 	if !ok {
-		done("", invocation.Deny, invocation.OutcomeDenied)
+		rec.reason(g.refusal(st, pr, ""))
+		rec.done("", invocation.Deny, invocation.OutcomeDenied)
 		transport.WriteError(w, http.StatusOK, req.ID, resourceNotFound(p.URI))
 		return
 	}
 	if st.blocked(target) {
-		done(target, invocation.Allow, invocation.OutcomeNotDelivered)
+		rec.done(target, invocation.Allow, invocation.OutcomeNotDelivered)
 		transport.WriteError(w, http.StatusServiceUnavailable, req.ID, &server.Error{Code: server.CodeInternalError,
 			Message: "Resource temporarily unavailable: the upstream catalog changed since approval"})
 		return
 	}
-	done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), p.URI, rawParams(req)))
+	rec.done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), p.URI, rawParams(req), rec.to(target)))
 }
 
 func (g *Gateway) complete(w http.ResponseWriter, r *http.Request, st *state, req *server.Request, pr authorization.Principal) {
@@ -262,9 +342,10 @@ func (g *Gateway) complete(w http.ResponseWriter, r *http.Request, st *state, re
 	switch p.Ref.Type {
 	case "ref/prompt":
 		var native string
-		done := g.recorder(r, st, pr, req, p.Ref.Name)
+		rec := g.recorder(r, st, pr, req, p.Ref.Name)
 		if target, native, ok = g.promptOwner(st, pr, p.Ref.Name); !ok {
-			done("", invocation.Deny, invocation.OutcomeDenied)
+			rec.reason(g.refusal(st, pr, g.promptTarget(st, p.Ref.Name)))
+			rec.done("", invocation.Deny, invocation.OutcomeDenied)
 			transport.WriteError(w, http.StatusOK, req.ID, &server.Error{Code: server.CodeInvalidParams, Message: "Unknown prompt: " + p.Ref.Name})
 			return
 		}
@@ -272,15 +353,16 @@ func (g *Gateway) complete(w http.ResponseWriter, r *http.Request, st *state, re
 		_ = json.Unmarshal(params["ref"], &ref)
 		ref["name"], _ = json.Marshal(native)
 		params["ref"], _ = json.Marshal(ref)
-		done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params))
+		rec.done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params, rec.to(target)))
 	case "ref/resource":
-		done := g.recorder(r, st, pr, req, p.Ref.URI)
+		rec := g.recorder(r, st, pr, req, p.Ref.URI)
 		if target, ok = g.resourceOwner(st, pr, p.Ref.URI); !ok {
-			done("", invocation.Deny, invocation.OutcomeDenied)
+			rec.reason(g.refusal(st, pr, ""))
+			rec.done("", invocation.Deny, invocation.OutcomeDenied)
 			transport.WriteError(w, http.StatusOK, req.ID, resourceNotFound(p.Ref.URI))
 			return
 		}
-		done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params))
+		rec.done(target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(target), "", params, rec.to(target)))
 	default:
 		transport.WriteError(w, http.StatusOK, req.ID, &server.Error{Code: server.CodeInvalidParams, Message: "ref.type must be ref/prompt or ref/resource"})
 	}

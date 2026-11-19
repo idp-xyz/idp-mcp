@@ -114,6 +114,7 @@ const (
 	CodeInternalError      = -32603
 	CodeVersionMismatch    = -32020 // header and body name different protocol versions
 	CodeUnsupportedVersion = -32022
+	CodeRateLimited        = -32029 // the gateway's own: the caller's client or subject is over its request limit (ADR-0001 D49)
 )
 
 // MaxRequestBody bounds a single JSON-RPC request.

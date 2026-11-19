@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"idp-mcp/internal/admission"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ func harnessWithIdentity(t *testing.T, identity string, signer ...*CallerSigner)
 	t.Helper()
 	up := newUpstream(t)
 	rec := &recorder{}
-	cfg := Config{GatewayID: "g1", Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: "test"}, DevMode: true,
+	cfg := Config{GatewayID: "g1", Clients: admission.Unrestricted(), Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: "test"}, DevMode: true,
 		CallTimeout: 2 * time.Second, Recorder: rec}
 	if len(signer) > 0 {
 		cfg.CallerSigner = signer[0]

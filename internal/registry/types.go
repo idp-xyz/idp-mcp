@@ -226,4 +226,6 @@ type Invocation struct {
 	LatencyMS     int64     `json:"latencyMs"`
 	TraceID       *string   `json:"traceId"`
 	ArgsDigest    *string   `json:"argsDigest"`
+	Reason        *string   `json:"reason"`
+	Bytes         *int64    `json:"bytes"`
 }

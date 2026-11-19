@@ -103,6 +103,29 @@ GW="$("${CURL[@]}" -H "Authorization: Bearer $ADMIN" -H 'Content-Type: applicati
 GW_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["gateway"]["gatewayId"])' <<<"$GW")"
 GW_TOKEN="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' <<<"$GW")"
 printf 'IDP_GATEWAY_ID=%s\nIDP_GATEWAY_TOKEN=%s\n' "$GW_ID" "$GW_TOKEN" >> "$ENVF"
+# the OAuth clients the gateway serves (idp-mcp ADR-0001 D46 to D48); the gateway does not start without the file.
+# apikey: an API key's client is "api-key:<id>" and the registry makes the id, so the run opts out on purpose with the
+# wildcard; jwt and oidc list the Keycloak clients that call, with the host, a host-only tool and an external client.
+case "$MODE" in
+  apikey) printf 'clients:\n  "*": platform   # client authorization off: API keys get their ids from the registry\n' > .local/gateway-clients.yaml ;;
+  jwt) cat > .local/gateway-clients.yaml <<'Y'
+clients:
+  idp-agent-allowed: {kind: platform, host: true}
+  idp-agent-viewer: {kind: platform}
+  idp-agent-foreign: {kind: platform}
+  idp-agent-plain: {kind: platform}
+  idp-agent-partner: {kind: external, tools: ["minimal__echo"]}
+hostOnlyTools: ["minimal__sum"]
+Y
+    ;;
+  oidc) cat > .local/gateway-clients.yaml <<'Y'
+clients:
+  agent-app: {kind: platform}
+  agent-exchange: {kind: platform, host: true}
+Y
+    ;;
+esac
+chmod 644 .local/gateway-clients.yaml   # the container's user (10001) reads it
 "${C[@]}" up -d mcp-gateway
 GWURL=http://127.0.0.1:3320; [[ "$MODE" == oidc ]] && GWURL=https://localhost:3320
 for _ in $(seq 1 60); do "${CURL[@]}" -o /dev/null "$GWURL/healthz" && break; sleep 0.5; done

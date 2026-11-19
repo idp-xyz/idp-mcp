@@ -1,6 +1,6 @@
 package release
 
-// The published contract idp.telos.mcp 1.1.0 (idp-contracts/idp.telos.mcp/1.1.0) is produced here.
+// The published contract idp.telos.mcp 1.2.0 (idp-contracts/idp.telos.mcp/1.2.0) is produced here.
 // api/contracts/schema.json is written by hand; these tests prove it describes exactly what this
 // package seals and what the gateway records. api/contracts/examples.json is generated from Go
 // values (go test ./internal/release -run TestContract -update) and checked on every run, so every
@@ -29,7 +29,7 @@ var update = flag.Bool("update", false, "regenerate api/contracts/examples.json 
 
 const (
 	contractDir = "../../api/contracts"
-	contractID  = "urn:idp:telos:mcp:1.1.0"
+	contractID  = "urn:idp:telos:mcp:1.2.0"
 )
 
 type noLoader struct{}
@@ -176,6 +176,18 @@ func exampleRecords(t *testing.T, releaseDigest string) []invocation.Record {
 			Decision: invocation.Allow, Outcome: invocation.OutcomeNotDelivered, LatencyMS: 3, TraceID: "4bf92f3577b34da6a3ce929d0e0e4737"},
 		{At: at.Add(3 * time.Second), ReleaseDigest: releaseDigest, Subject: "alice", Client: "agent-exchange", AuthMethod: "jwt", Method: "tasks/get",
 			Tool: "task_01JD7Q3Z8M8T0G3C6N4V9S2A1B", Target: "tasks", Decision: invocation.Allow, Outcome: invocation.OutcomeOK, LatencyMS: 7},
+		{At: at.Add(4 * time.Second), ReleaseDigest: releaseDigest, Subject: "alice", Client: "partner-docs", AuthMethod: "jwt", Method: "tools/list", Tool: invocation.Whole,
+			Decision: invocation.Deny, Outcome: invocation.OutcomeDenied, LatencyMS: 0, Reason: "client not listed"},
+		{At: at.Add(5 * time.Second), ReleaseDigest: releaseDigest, Subject: "alice", Client: "idp-host", AuthMethod: "jwt", Method: "tools/call", Tool: "web__web_fetch", Target: "web",
+			Decision: invocation.Allow, Outcome: invocation.OutcomeStreamed, LatencyMS: 1800, Bytes: 20480},
+		{At: at.Add(5 * time.Second), ReleaseDigest: releaseDigest, Subject: "alice", Client: "idp-host", AuthMethod: "jwt", Method: "tools/call", Tool: "web__web_fetch", Target: "web",
+			Decision: invocation.Allow, Outcome: invocation.OutcomeStreamStarted},
+		{At: at.Add(6 * time.Second), ReleaseDigest: releaseDigest, Subject: "alice", Client: "idp-host", AuthMethod: "jwt", Method: "subscriptions/listen", Tool: invocation.Whole,
+			Decision: invocation.Allow, Outcome: invocation.OutcomeStreamed, LatencyMS: 60000, Bytes: 512, Reason: "tools=true prompts=false resources=false subscriptions=0 tasks=0"},
+		{At: at.Add(6 * time.Second), ReleaseDigest: releaseDigest, Subject: "alice", Client: "partner-docs", AuthMethod: "jwt", Method: "tools/call", Tool: "*",
+			Decision: invocation.Deny, Outcome: invocation.OutcomeRateLimited, Reason: "client rate limit; retry after 12s"},
+		{At: at.Add(7 * time.Second), ReleaseDigest: releaseDigest, Subject: invocation.NoSubject, AuthMethod: "jwt", Method: "tools/list", Tool: invocation.Whole,
+			Decision: invocation.Deny, Outcome: invocation.OutcomeUnauthorized, Reason: "no bearer credential"},
 	}
 }
 
@@ -216,7 +228,7 @@ func buildExamples(t *testing.T) []byte {
 		add("InvocationRecord", r)
 	}
 	b, err := json.MarshalIndent(examplesFile{
-		Description: "idp.telos.mcp 1.1.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
+		Description: "idp.telos.mcp 1.2.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
 		GeneratedBy: "go test ./internal/release -run TestContract -update",
 		Examples:    out,
 	}, "", "  ")
@@ -493,7 +505,9 @@ func TestContractRejectsWhatValidateRejects(t *testing.T) {
 		"fractional latency":   {"latencyMs", 1.5},
 		"bad traceId":          {"traceId", "xyz"},
 		"unknown authMethod":   {"authMethod", "basic"},
-		"unlisted method":      {"method", "tools/list"},
+		"unlisted method":      {"method", "tools/rename"},
+		"negative bytes":       {"bytes", -1},
+		"oversized reason":     {"reason", strings.Repeat("x", 513)},
 		"empty subject":        {"subject", ""},
 		"bad releaseDigest":    {"releaseDigest", "sha1:abc"},
 		"bad argsDigest":       {"argsDigest", "abc"},

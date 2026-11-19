@@ -31,8 +31,30 @@ data:
   # The key that signs the caller forwarded to targets approved for identity (ADR-0001 D44): a P-256 private key in
   # a Secret mounted read-only (one key for all replicas); give its public half to those upstreams.
   # IDP_GATEWAY_CALLER_KEY_FILE: "/etc/idp/caller/caller.key"
+  # The OAuth clients this gateway serves (ADR-0001 D46 to D49): the file below. The gateway does not start without it.
+  IDP_GATEWAY_CLIENTS_FILE: "/etc/idp/clients/clients.yaml"
   IDP_LOG_LEVEL: "info"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
+---
+# The clients file. A client that is not listed is authenticated and granted nothing. Edit this before the first
+# deployment: list the OAuth client ids (the azp of the tokens) of the programs that call this gateway. Pods read
+# the file at start, so a change is a rollout (kubectl -n idp-mcp rollout restart deploy/idp-mcp-gateway-edge-1).
+# The entry "*": platform would serve every client and turn the control off; do not write it in production.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idp-mcp-gateway-edge-1-clients
+  namespace: idp-mcp
+data:
+  clients.yaml: |
+    clients:
+      idp-host: {kind: platform, host: true}      # the agent runtime: calls with its members' exchanged tokens
+    # tools that only the host may call (path.Match patterns over exposed tool names); set to the outward tools
+    # of this deployment, for example ["web__*"]
+    hostOnlyTools: []
+    # rateLimits:
+    #   perClient: {requests: 600, window: 1m}    # per replica
+    #   perSubject: {requests: 120, window: 1m}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -101,6 +123,9 @@ spec:
             - name: upstream-ca
               mountPath: /etc/idp/upstream-ca
               readOnly: true
+            - name: clients
+              mountPath: /etc/idp/clients
+              readOnly: true
             - name: cache
               mountPath: /var/cache/idp
           readinessProbe:
@@ -141,6 +166,9 @@ spec:
           secret:
             secretName: idp-mcp-upstream-ca
             optional: true
+        - name: clients
+          configMap:
+            name: idp-mcp-gateway-edge-1-clients
         - name: cache
           emptyDir:
             sizeLimit: 64Mi

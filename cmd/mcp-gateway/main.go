@@ -6,6 +6,10 @@
 //	IDP_GATEWAY_INSTANCE       this replica's id (default: hostname); replicas of one gateway record
 //	                           each attest, and a deployment is GOOD only when all live ones run it
 //	IDP_GATEWAY_LISTEN         listen address (default 127.0.0.1:3220)
+//	IDP_GATEWAY_CLIENTS_FILE   required: the OAuth clients this gateway serves, which of them is the HOST, the tools only
+//	                           the HOST may call, and the rate limits (YAML or JSON; ADR-0001 D46 to D49). The gateway
+//	                           does not start without it; a client it does not list sees nothing. The entry
+//	                           "*": platform serves every client and turns the control off
 //	IDP_GATEWAY_ALLOWED_HOSTS  extra Host names accepted besides loopback, comma separated
 //	IDP_DEV_MODE               "true" allows loopback upstreams
 //	IDP_REGISTRY_URL           registry service base URL; with IDP_GATEWAY_TOKEN[_FILE] the gateway
@@ -42,6 +46,7 @@ import (
 	"syscall"
 	"time"
 
+	"idp-mcp/internal/admission"
 	"idp-mcp/internal/gateway"
 	"idp-mcp/internal/invocation"
 	"idp-mcp/internal/observability"
@@ -94,6 +99,13 @@ func run(log *slog.Logger) error {
 	if id == "" {
 		return errors.New("IDP_GATEWAY_ID is required")
 	}
+	clients, err := admission.Load(env("IDP_GATEWAY_CLIENTS_FILE", ""))
+	if err != nil {
+		return err
+	}
+	for _, w := range clients.Warnings() {
+		log.Warn("clients file: " + w)
+	}
 	registry, token, file := env("IDP_REGISTRY_URL", ""), secret("IDP_GATEWAY_TOKEN"), env("IDP_RELEASE_FILE", "")
 	if (registry == "") == (file == "") {
 		return errors.New("set exactly one of IDP_REGISTRY_URL (with IDP_GATEWAY_TOKEN) or IDP_RELEASE_FILE")
@@ -136,6 +148,7 @@ func run(log *slog.Logger) error {
 		Tracer:       tp,
 		IdentityHTTP: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: identityTLS}},
 		DevMode:      env("IDP_DEV_MODE", "false") == "true", AllowedHosts: hosts,
+		Clients:     clients,
 		CallTimeout: duration("IDP_CALL_TIMEOUT", 60*time.Second), DriftInterval: duration("IDP_DRIFT_INTERVAL", time.Minute), Log: log}
 	if f := env("IDP_GATEWAY_CALLER_KEY_FILE", ""); f != "" {
 		b, err := os.ReadFile(f)
@@ -163,8 +176,8 @@ func run(log *slog.Logger) error {
 	} else {
 		batcher = invocation.NewBatcher(func(_ context.Context, b []invocation.Record) error {
 			for _, r := range b {
-				log.Info("invocation", "subject", r.Subject, "tool", r.Tool, "decision", r.Decision, "outcome", r.Outcome,
-					"latencyMs", r.LatencyMS, "traceId", r.TraceID, "release", r.ReleaseDigest)
+				log.Info("invocation", "subject", r.Subject, "client", r.Client, "method", r.Method, "tool", r.Tool, "decision", r.Decision, "outcome", r.Outcome,
+					"reason", r.Reason, "bytes", r.Bytes, "latencyMs", r.LatencyMS, "traceId", r.TraceID, "release", r.ReleaseDigest)
 			}
 			return nil
 		}, log)

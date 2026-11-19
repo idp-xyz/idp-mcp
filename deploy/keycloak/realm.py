@@ -26,6 +26,11 @@ identities = {
     "agent-allowed": (tenant, ["operator"], resource),
     "agent-viewer": (tenant, ["viewer"], resource),
     "agent-foreign": (foreign, ["operator"], resource),
+    # clients of the gateway's client admission (idp-mcp ADR-0001 D46): a platform client that is not the host, an
+    # external client with an allow-list, and one that deploy/e2e.sh does not list
+    "agent-plain": (tenant, ["operator"], resource),
+    "agent-partner": (tenant, ["operator"], resource),
+    "agent-stranger": (tenant, ["operator"], resource),
 }
 
 

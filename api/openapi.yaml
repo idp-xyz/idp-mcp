@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: idp-mcp registry-service API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Control plane of idp-mcp (docs/adr/ADR-0001-mcp-infrastructure.md).
 
@@ -490,14 +490,16 @@ components:
         client: {type: string, description: OAuth client the token was issued to (azp)}
         actor: {type: string, description: delegated caller of an RFC 8693 token (act.client_id or act.sub)}
         authMethod: {type: string}
-        method: {type: string, enum: [tools/call, prompts/get, resources/read, completion/complete, tasks/get, tasks/update, tasks/cancel]}
+        method: {type: string, enum: [tools/call, prompts/get, resources/read, completion/complete, tasks/get, tasks/update, tasks/cancel, tools/list, prompts/list, resources/list, resources/templates/list, subscriptions/listen, server/discover]}
         tool: {type: string, description: 'tool or prompt name, or resource URI, as requested'}
         target: {type: string}
         decision: {type: string, enum: [ALLOW, DENY]}
-        outcome: {type: string, enum: [OK, TOOL_ERROR, RPC_ERROR, STREAMED, NOT_DELIVERED, UNKNOWN, DENIED, INVALID_ARGUMENTS]}
+        outcome: {type: string, enum: [OK, TOOL_ERROR, RPC_ERROR, STREAMED, NOT_DELIVERED, UNKNOWN, DENIED, INVALID_ARGUMENTS, STREAM_STARTED, RATE_LIMITED, UNAUTHENTICATED]}
         latencyMs: {type: integer}
         traceId: {type: string}
         argsDigest: {type: string}
+        reason: {type: string, maxLength: 512, description: 'why a request was refused, or the operator reason of a host-only exception that let it through'}
+        bytes: {type: integer, minimum: 0, description: 'bytes of an event stream relayed; on the record that ends it'}
     Invocation:
       allOf:
         - $ref: '#/components/schemas/InvocationRecord'

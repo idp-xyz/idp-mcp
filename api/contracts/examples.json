@@ -1,5 +1,5 @@
 {
-  "description": "idp.telos.mcp 1.1.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
+  "description": "idp.telos.mcp 1.2.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
   "generatedBy": "go test ./internal/release -run TestContract -update",
   "examples": [
     {
@@ -463,6 +463,103 @@
         "subject": "alice",
         "target": "tasks",
         "tool": "task_01JD7Q3Z8M8T0G3C6N4V9S2A1B"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:04Z",
+        "authMethod": "jwt",
+        "client": "partner-docs",
+        "decision": "DENY",
+        "latencyMs": 0,
+        "method": "tools/list",
+        "outcome": "DENIED",
+        "reason": "client not listed",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "alice",
+        "tool": "*"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:05Z",
+        "authMethod": "jwt",
+        "bytes": 20480,
+        "client": "idp-host",
+        "decision": "ALLOW",
+        "latencyMs": 1800,
+        "method": "tools/call",
+        "outcome": "STREAMED",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "alice",
+        "target": "web",
+        "tool": "web__web_fetch"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:05Z",
+        "authMethod": "jwt",
+        "client": "idp-host",
+        "decision": "ALLOW",
+        "latencyMs": 0,
+        "method": "tools/call",
+        "outcome": "STREAM_STARTED",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "alice",
+        "target": "web",
+        "tool": "web__web_fetch"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:06Z",
+        "authMethod": "jwt",
+        "bytes": 512,
+        "client": "idp-host",
+        "decision": "ALLOW",
+        "latencyMs": 60000,
+        "method": "subscriptions/listen",
+        "outcome": "STREAMED",
+        "reason": "tools=true prompts=false resources=false subscriptions=0 tasks=0",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "alice",
+        "tool": "*"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:06Z",
+        "authMethod": "jwt",
+        "client": "partner-docs",
+        "decision": "DENY",
+        "latencyMs": 0,
+        "method": "tools/call",
+        "outcome": "RATE_LIMITED",
+        "reason": "client rate limit; retry after 12s",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "alice",
+        "tool": "*"
+      }
+    },
+    {
+      "definition": "InvocationRecord",
+      "value": {
+        "at": "2026-11-03T10:15:07Z",
+        "authMethod": "jwt",
+        "decision": "DENY",
+        "latencyMs": 0,
+        "method": "tools/list",
+        "outcome": "UNAUTHENTICATED",
+        "reason": "no bearer credential",
+        "releaseDigest": "sha256:185fcfe3bd977400da1b6346be4fc4348bc1ebabdf50c37002e7e2411e298dcd",
+        "subject": "(none)",
+        "tool": "*"
       }
     }
   ]

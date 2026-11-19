@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"idp-mcp/internal/admission"
 	"io"
 	"log/slog"
 	"net/http"
@@ -285,7 +286,7 @@ func TestControlPlaneToDataPlane(t *testing.T) {
 		PollInterval: 150 * time.Millisecond, HeartbeatInterval: 150 * time.Millisecond, Log: log}
 	rec := invocation.NewBatcher(sync.Sink(), log)
 	rec.Interval = 200 * time.Millisecond
-	g := gateway.New(gateway.Config{GatewayID: gid, Info: server.ServerInfo{Name: "gw", Version: "it"}, DevMode: true,
+	g := gateway.New(gateway.Config{GatewayID: gid, Clients: admission.Unrestricted(), Info: server.ServerInfo{Name: "gw", Version: "it"}, DevMode: true,
 		CallTimeout: 5 * time.Second, DriftInterval: 300 * time.Millisecond, Recorder: rec, Dropped: rec.Dropped, Log: log})
 	sync.Gateway = g
 	runCtx, cancel := context.WithCancel(ctx)
@@ -323,6 +324,17 @@ func TestControlPlaneToDataPlane(t *testing.T) {
 	}
 	eventually(t, "invocations to reach the registry", 5*time.Second, func() bool {
 		return len(a.do(bob, "GET", "/api/v1/invocations", nil, 200)["items"].([]any)) >= 2
+	})
+	// the completed audit (ADR-0001 D49) survives the registry: the anonymous request, the list call, and the
+	// reason of a refusal are stored and read back
+	eventually(t, "the refused credential and the list call to be stored with their new fields", 5*time.Second, func() bool {
+		var unauthenticated, listed bool
+		for _, item := range a.do(bob, "GET", "/api/v1/invocations", nil, 200)["items"].([]any) {
+			m := item.(map[string]any)
+			unauthenticated = unauthenticated || (m["outcome"] == "UNAUTHENTICATED" && m["subject"] == "(none)" && m["reason"] == "no bearer credential" && m["method"] == "tools/list")
+			listed = listed || (m["method"] == "tools/list" && m["subject"] == "svc-agent" && m["decision"] == "ALLOW" && m["tool"] == "*")
+		}
+		return unauthenticated && listed
 	})
 	for _, item := range a.do(bob, "GET", "/api/v1/invocations", nil, 200)["items"].([]any) {
 		if strings.Contains(fmt.Sprint(item), "hello idp") {

@@ -16,8 +16,8 @@ import (
 // Tasks extension (SEP-2663, io.modelcontextprotocol/tasks). A task-supporting tool may answer
 // tools/call with a CreateTaskResult (resultType "task", top-level taskId). Task ids are opaque and
 // chosen by the upstream, so the gateway remembers which target created each task and for whom:
-// tasks/get and tasks/cancel are routed to that target, and only the creating caller (same tenant
-// and subject) may use the id - anyone else gets the same "unknown task" answer as for an id that
+// tasks/get and tasks/cancel are routed to that target, and only the creating caller (same tenant,
+// subject and OAuth client) may use the id - anyone else gets the same "unknown task" answer as for an id that
 // never existed. tasks/list and tasks/result were removed in v2 and stay -32601. Bindings expire
 // with the task's ttlMs (capped), so the table is bounded.
 
@@ -31,6 +31,7 @@ type taskBinding struct {
 	target  string
 	tenant  string
 	subject string
+	client  string // the OAuth client that created it: the one that may use it, whatever the member's other clients
 	tool    string // exposed tool name that created the task
 	expires time.Time
 }
@@ -57,7 +58,7 @@ func (s *taskStore) bindFromResult(msg json.RawMessage, target, tool string, pr 
 	if m.Result.TTLMs != nil && *m.Result.TTLMs > 0 {
 		ttl = min(time.Duration(*m.Result.TTLMs)*time.Millisecond, maxTaskRetention)
 	}
-	s.bind(m.Result.TaskID, taskBinding{target: target, tenant: pr.Tenant, subject: pr.Subject, tool: tool, expires: time.Now().Add(ttl)})
+	s.bind(m.Result.TaskID, taskBinding{target: target, tenant: pr.Tenant, subject: pr.Subject, client: pr.ClientID(), tool: tool, expires: time.Now().Add(ttl)})
 }
 
 func (s *taskStore) bind(id string, b taskBinding) {
@@ -90,7 +91,7 @@ func (s *taskStore) lookup(id string, pr authorization.Principal) (taskBinding, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.by[id]
-	if !ok || b.target == "" || time.Now().After(b.expires) || b.tenant != pr.Tenant || b.subject != pr.Subject {
+	if !ok || b.target == "" || time.Now().After(b.expires) || b.tenant != pr.Tenant || b.subject != pr.Subject || b.client != pr.ClientID() {
 		return taskBinding{}, false
 	}
 	return b, true
@@ -125,13 +126,14 @@ func (g *Gateway) taskRequest(w http.ResponseWriter, r *http.Request, st *state,
 		TaskID string `json:"taskId"`
 	}
 	_ = req.DecodeParams(&p)
-	done := g.recorder(r, st, pr, req, p.TaskID)
+	rec := g.recorder(r, st, pr, req, p.TaskID)
 	b, ok := g.tasks.lookup(p.TaskID, pr)
 	if !ok || !targetHas(st.doc, b.target, release.CapTasks) || st.router.Endpoint(b.target) == "" {
-		done("", invocation.Deny, invocation.OutcomeDenied)
+		rec.reason(g.refusal(st, pr, ""))
+		rec.done("", invocation.Deny, invocation.OutcomeDenied)
 		transport.WriteError(w, http.StatusOK, req.ID, unknownTask(p.TaskID))
 		return
 	}
 	// drift does not block: the task already runs upstream; its owner may still read or cancel it
-	done(b.target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(b.target), p.TaskID, rawParams(req)))
+	rec.done(b.target, invocation.Allow, g.forward(w, r, st, req, st.router.Endpoint(b.target), p.TaskID, rawParams(req), rec.to(b.target)))
 }
