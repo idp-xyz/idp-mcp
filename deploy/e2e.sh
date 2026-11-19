@@ -63,6 +63,10 @@ cleanup() { [[ "${KEEP:-0}" == 1 ]] || "${C[@]}" down -v --remove-orphans >/dev/
 trap cleanup EXIT
 
 SERVICES=(postgres minimal reference); [[ "$MODE" == jwt ]] && SERVICES+=(keycloak)
+# the third-party images of these services (PostgreSQL, Keycloak), named by the compose file, pulled here with retries so that compose has nothing to pull
+PULL_SERVICES=("${SERVICES[@]}"); [[ "$MODE" == oidc ]] && PULL_SERVICES+=(keycloak-prod)
+mapfile -t THIRD < <("${C[@]}" config --images "${PULL_SERVICES[@]}")
+bash deploy/pull-image.sh "${THIRD[@]}"
 "${C[@]}" up -d --wait "${SERVICES[@]}"
 if [[ "$MODE" == oidc ]]; then
   "${C[@]}" exec -T postgres psql -U postgres -q -c 'CREATE DATABASE keycloak' >/dev/null

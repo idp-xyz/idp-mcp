@@ -53,6 +53,8 @@ MODE=oidc bash deploy/e2e.sh  # 生产模式 Keycloak（TLS、PostgreSQL）+ 全
 go test ./internal/release -run TestContract -update   # 改了 Release / InvocationRecord 后重新生成契约示例（api/contracts/examples.json）
 ```
 
+CI 与 `deploy/e2e.sh` 里的第三方镜像（PostgreSQL、Keycloak、trivy、测试替身的基础镜像）先由 `deploy/pull-image.sh` 显式拉取并重试（最多 5 次，间隔 15、30、60、120 秒；本机已有则跳过），因为公共 registry 对匿名拉取按来源地址限流，而 CI 的 runner 与许多项目共用地址。
+
 `deploy/e2e.sh` 需要 `idp-fixture-upstream:local` 镜像（两个真实 MCP SDK 上游的测试替身），由 `bash deploy/fixtures/build.sh` 构建；来源见该脚本头部。
 
 ## 实测结果（2026-11-02，WSL，Go 1.26.8）
