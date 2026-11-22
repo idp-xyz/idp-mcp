@@ -28,7 +28,10 @@
 //	IDP_IDENTITY_CA_FILE       extra trusted CAs for the JWKS endpoint
 //	IDP_BRIDGE_ENDPOINTS       addresses of the bridge endpoints (hosts or http(s) URL prefixes, comma separated; empty by
 //	                           default): a release with a target there that is not of class external is refused
-//	                           (ADR-0001 D50). Set it to what the registry has
+//	                           (ADR-0001 D50). Set it to what the registry has. A target of class external there is sent
+//	                           the signed caller assertion (needs IDP_GATEWAY_CALLER_KEY_FILE) and nothing else of the
+//	                           caller; the other external targets are sent nothing and their results lose every
+//	                           io.idp.telos/ key (ADR-0001 15.1)
 //	IDP_GATEWAY_EXTERNAL_MAX_RESULT_BYTES  longest answer, and longest event of a stream, from a target of class external
 //	                           (1048576; ADR-0001 D51 d)
 //	IDP_GATEWAY_EXTERNAL_MAX_STREAM_BYTES  most that a stream from such a target may carry (4194304)

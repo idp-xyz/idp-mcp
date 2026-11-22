@@ -35,6 +35,8 @@ data:
   IDP_GATEWAY_CLIENTS_FILE: "/etc/idp/clients/clients.yaml"
   # Upstreams of class external (a third party's servers, ADR-0001 D50 and D51). The bridge addresses are the same list
   # as the registry's (IDP_BRIDGE_ENDPOINTS there): a release with a target there that is not external is refused.
+  # A target there is sent the gateway's signed caller assertion (needs the caller key) and nothing else of the caller
+  # (ADR-0001 15.1); an external target elsewhere is sent nothing and its results lose every io.idp.telos/ key.
   # The limits are the defaults, which are what the HOST accepts (idp-host reads 8 MiB at most and gives the model
   # 16 KiB of a tool result): one answer or one event 1 MiB, one stream 4 MiB; three failed catalog probes (at
   # IDP_DRIFT_INTERVAL) block calls to such a target until a probe succeeds.

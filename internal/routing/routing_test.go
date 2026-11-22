@@ -88,3 +88,23 @@ func TestTheExternalMarkerIsTheGatewaysAloneForAnyUpstream(t *testing.T) {
 		t.Error("Listed changed the pinned definition")
 	}
 }
+
+func TestAnExternalToolCarriesNoKeyOfThePlatformButTheGatewaysMarker(t *testing.T) {
+	def := func() server.Tool {
+		return server.Tool{Name: "t", Extra: map[string]any{"_meta": map[string]any{"io.idp.telos/internal": true,
+			"io.idp.telos/authorizationRequired": map[string]any{"connection": "x"}, "com.example/k": "v"}}}
+	}
+	r := New(&release.Document{ToolNaming: release.NamingPrefixed, Targets: []release.Target{
+		{Name: "ours", Endpoint: "http://a/mcp", Tools: []server.Tool{def()}},
+		{Name: "theirs", Class: release.ClassExternal, Endpoint: "http://b/mcp", Tools: []server.Tool{def()}}}})
+	rt, _ := r.Lookup("theirs__t")
+	m, _ := rt.Listed().Extra["_meta"].(map[string]any)
+	if len(m) != 2 || m[server.MetaExternal] != true || m["com.example/k"] != "v" {
+		t.Errorf("an external tool's _meta %v", m)
+	}
+	rt, _ = r.Lookup("ours__t")
+	m, _ = rt.Listed().Extra["_meta"].(map[string]any)
+	if len(m) != 3 || m["io.idp.telos/internal"] != true || m["io.idp.telos/authorizationRequired"] == nil {
+		t.Errorf("an internal tool's _meta was changed: %v", m)
+	}
+}

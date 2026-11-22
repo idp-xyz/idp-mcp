@@ -3,6 +3,8 @@
 package routing
 
 import (
+	"strings"
+
 	"idp-mcp/internal/release"
 	"idp-mcp/internal/server"
 )
@@ -82,6 +84,9 @@ func (r *Router) Route(target, tool string) (Route, bool) {
 // Endpoint returns a target's endpoint.
 func (r *Router) Endpoint(target string) string { return r.endpoints[target] }
 
+// ourKeyPrefix is the prefix of the keys that mean something to the platform; a third party's tool may not carry one.
+const ourKeyPrefix = "io.idp.telos/"
+
 // Listed is the definition shown to clients: the pinned tool under its exposed name. The gateway's marker
 // (server.MetaExternal) is set in its _meta when the target is external and removed when it is not, whatever the
 // upstream put there: the marker says what the gateway knows, so no upstream can claim to be internal by leaving
@@ -96,9 +101,10 @@ func (rt Route) Listed() server.Tool {
 	}
 	meta := map[string]any{}
 	for k, v := range old {
-		if k != server.MetaExternal {
-			meta[k] = v
+		if k == server.MetaExternal || (rt.External && strings.HasPrefix(k, ourKeyPrefix)) {
+			continue // for an external tool no key of the platform survives but the gateway's own marker, set below
 		}
+		meta[k] = v
 	}
 	if rt.External {
 		meta[server.MetaExternal] = true

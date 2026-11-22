@@ -194,3 +194,35 @@ func stampCaller(params map[string]json.RawMessage, mode string, pr authorizatio
 	out["_meta"] = b
 	return out, nil
 }
+
+// assertCaller adds to the _meta of params, which externalParams made, the gateway's assertion over the caller, the
+// target's endpoint and this request, and nothing else: no MetaCaller, so the bridge learns who is calling only
+// from what it can verify (ADR-0001 D51 a, revised). It is for a target of class external at a bridge address and
+// fails closed: without a signer or without a verified caller there is nothing the bridge could trust, and it is not
+// sent a call it would answer with "authorization required" for the wrong member.
+func assertCaller(params map[string]json.RawMessage, pr authorization.Principal, known bool, signer *CallerSigner,
+	endpoint, method string) (map[string]json.RawMessage, error) {
+	if signer == nil || !known {
+		return nil, errors.New("a bridge target needs the gateway's caller key and a verified caller")
+	}
+	roles := pr.Roles
+	if roles == nil {
+		roles = []string{}
+	}
+	assertion, err := signer.sign(Caller{Subject: pr.Subject, Tenant: pr.Tenant, Roles: roles, Client: pr.Client, Actor: pr.Actor}, endpoint, method, params)
+	if err != nil {
+		return nil, fmt.Errorf("sign the caller: %w", err)
+	}
+	var meta map[string]json.RawMessage
+	_ = json.Unmarshal(params["_meta"], &meta)
+	if meta == nil {
+		meta = map[string]json.RawMessage{}
+	}
+	meta[MetaCallerAssertion], _ = json.Marshal(assertion)
+	out := make(map[string]json.RawMessage, len(params))
+	for k, v := range params {
+		out[k] = v
+	}
+	out["_meta"], _ = json.Marshal(meta)
+	return out, nil
+}

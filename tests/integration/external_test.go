@@ -2,6 +2,11 @@ package integration
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -169,7 +174,14 @@ func TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted(t *testing.T)
 		PollInterval: 150 * time.Millisecond, HeartbeatInterval: 150 * time.Millisecond, Log: log}
 	rec := invocation.NewBatcher(sync.Sink(), log)
 	rec.Interval = 200 * time.Millisecond
-	g := gateway.New(gateway.Config{GatewayID: gid, Clients: clients, Info: server.ServerInfo{Name: "gw", Version: "it"}, DevMode: true,
+	// the server is at a bridge address, so the gateway signs the caller for it: it needs a key
+	callerKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(callerKey)
+	signer, err := gateway.NewCallerSigner(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), "idp-mcp-gateway:"+gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := gateway.New(gateway.Config{CallerSigner: signer, GatewayID: gid, Clients: clients, Info: server.ServerInfo{Name: "gw", Version: "it"}, DevMode: true,
 		CallTimeout: 5 * time.Second, DriftInterval: 200 * time.Millisecond, Recorder: rec, Dropped: rec.Dropped, Log: log,
 		ExternalMaxResult: 32 << 10, Bridges: bridges})
 	sync.Gateway = g
@@ -197,8 +209,11 @@ func TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted(t *testing.T)
 	if st, res := mcp(t, gw.URL, hostKey["key"].(string), "tools/call", callParams, "partner__search"); st != 200 || !strings.Contains(fmt.Sprint(res["result"]), "acme") {
 		t.Fatalf("%d %v", st, res)
 	}
-	if hostile.Saw("svc-host") || hostile.Saw("it-client") {
-		t.Fatal("the external server learned who called")
+	if hostile.Saw("svc-host") || hostile.Saw("it-client") || hostile.Saw(`"io.idp.telos/caller"`) {
+		t.Fatal("the server at the bridge address learned who called other than by the signed assertion")
+	}
+	if !hostile.Saw("io.idp.telos/caller-assertion") {
+		t.Fatal("the server at the bridge address got no signed assertion")
 	}
 	hostile.SetBehavior(hostileserver.Oversized, 100<<10, 0)
 	_, res := mcp(t, gw.URL, hostKey["key"].(string), "tools/call", callParams, "partner__search")

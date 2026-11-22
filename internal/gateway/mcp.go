@@ -376,10 +376,16 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 	external := tgt != nil && tgt.External()
 	var progress json.RawMessage
 	var err error
+	// a target of class external at a bridge address is ours: the bridge must know whose token to use (D51 a, revised)
+	bridge := external && g.cfg.Bridges.Matches(endpoint)
 	if external {
 		// a target of class external is sent no identity whatever its identity mode says, and a _meta made of the
-		// allow-list alone (ADR-0001 D51 a, b); stampCaller is not even called
+		// allow-list alone (ADR-0001 D51 a, b); stampCaller is not even called. At a bridge address the one addition
+		// is the signed assertion, made over the params as they are sent
 		params, progress = externalParams(params)
+		if bridge {
+			params, err = assertCaller(params, caller, known, g.cfg.CallerSigner, endpoint, req.Method)
+		}
 	} else {
 		params, err = stampCaller(params, identityOf(st.doc, endpoint), caller, known, g.cfg.CallerSigner, endpoint, req.Method)
 	}
@@ -424,7 +430,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, st *state, req
 	}
 	defer resp.Body.Close()
 	if external {
-		return g.relayExternal(w, req, resp, rec, progress)
+		return g.relayExternal(w, req, resp, rec, progress, bridge)
 	}
 	switch transport.MediaType(resp.Header.Get("Content-Type")) {
 	case "application/json":

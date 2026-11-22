@@ -356,6 +356,33 @@ M6、M7 改了转发路径（调用者转发与签名）之后，官方符合性
 | D52 | **external 目标的一切都是"只许 HOST"**：`authorization.hostOnlyByRelease` 对 external 目标返回真（工具、prompts、资源），所以只有客户端文件里 `host: true` 的客户端能看到、调用它们；运维的 `hostOnlyExcept` 对**工具**照常有效（模式加理由，每次使用都进审计）。prompts 与 resources 没有例外机制：它们没有工具名可匹配，external 目标的 prompts 与资源永远只给 HOST | 成员确认、敏感级别上限、不可信标记都在 HOST 里，绕过 HOST 就绕过它们（C8）；"所有外部上游的工具缺省只许 HOST"是平台决策的选择点 4 |
 | D53 | **评审人看到的**：此前 `GET /api/v1/servers` 只返回工具名，评审人批准一个服务器时看不到描述和参数定义。新接口 `GET /api/v1/servers/{id}/catalog` 返回最新与已批准的两个快照，每个工具的**完整**定义（名字、标题、描述、输入与输出 schema、注解、其余字段，即将被钉住的那一份），prompts、资源、资源模板同样；`changes` 是最新对已批准的差异：每一项新增、删除或改变，改变的写明哪些 JSON 键不同（`description`、`inputSchema`、`annotations`……）；还没有已批准的快照时全是新增。**批准 external 服务器的请求必须带 `{"digest": "<看过的目录摘要>"}`**（内部服务器可选）：摘要与最新快照不同就拒绝（409），所以评审之后才发现的目录不会被没看过就批准。**描述的长度**：external 服务器的目录，发现时（描述是那时才知道的）检查每个工具的 `description`、`title`，以及输入、输出 schema 与注解里每一处 `description`、`title`，上限 `IDP_EXTERNAL_MAX_DESCRIPTION` 字节（注册服务的设置，缺省 1024，约 150 个词）；含控制字符或不可见字符（零宽、方向控制、Unicode 标签字符）的也拒绝；prompts 同样。超过时发现失败（422），写明工具名与位置。内部服务器不受影响 | 描述是对模型的指令，评审人没读过全文就没评审过；schema 里的 `description` 是同样的通道，所以一并限制；不可见字符是把指令藏起来不让人看见的办法。长度上限给攻击者的空间设了上界，也给评审人要读的东西设了上界 |
 
+### 15.1 修订 D51-a：桥的地址上的 external 目标收到网关签的调用者断言（2026-11-22，G1，契约不变）
+
+桥（idp-mcp-bridge，见平台的 `docs/adr/idp-mcp-bridge-oauth-plan.md`）是我们自己的组件，在网关与第三方 MCP 服务之间，用**成员各自的** OAuth 令牌调用第三方。要选对令牌，桥必须知道调用者是谁；而 D51-a 对 external 一律不发身份。所以 D51-a 改为：
+
+| 目标 | 收到的身份 | 其余 D51 规则 |
+|---|---|---|
+| external，**不在**桥的地址 | 什么都没有（与此前相同） | 全部照旧 |
+| external，**在**桥的地址（`IDP_BRIDGE_ENDPOINTS` 匹配其 `endpoint`） | 只有 `_meta["io.idp.telos/caller-assertion"]`：网关的签名（D44 的同一把密钥、同样的声明，`aud` = 这个目标的 `endpoint`，`req` = 实际发出的 `params` 的摘要，有效期 60 秒） | 全部照旧：没有明文的 `io.idp.telos/caller`、主体、租户、角色，`_meta` 仍是 D51-b 的白名单加这一个键，没有追踪头 |
+| internal | 照旧（由 `identity` 决定） | 照旧 |
+
+- 没有签名密钥（`IDP_GATEWAY_CALLER_KEY_FILE`）或没有已验证的调用者时，对桥的调用**不发出**（`NOT_DELIVERED`）：桥得不到可信的身份，就不该收到一个会按"没人"处理的调用。
+- **没有新增类别或身份模式，契约 `idp.telos.mcp` 不变（仍是 1.3.0）。** 判定用的是已经由审批人批准、进了 Release 的两个事实：目标是 `external`，端点在桥的地址上；而桥的地址早已强制"必须是 external"（D50，登记、发现、激活各查一次）。再加一个 `class: bridge` 或 `identity: assert` 只会让同一件事有两个写法，并且要升契约到 1.4.0；登记规则也因此不变：桥地址上的服务器必须是 external（仍拒绝 internal），external 的 `identity` 仍必须是 `none`（连在桥的地址上也拒绝 `forward`，因为 `forward` 会发明文的调用者）。计划原先设想的"桥地址登记为 `assert`"在代码里没有这个模式（现有的只有 `none`、`forward`），没有采用。
+- **理由**：成员要用自己的令牌，要由桥来选；"不对第三方传 TELOS 的身份"这条规则改由桥在**它对第三方的那一跳**执行（桥只出示成员自己的第三方令牌和白名单内的 `_meta`）。网关这一跳仍不让身份到达任何不是我们的东西。
+- **反方向的防护**（纵深防御）：桥会在工具结果的 `structuredContent` 里放"需要授权"标记 `io.idp.telos/authorizationRequired: {connection}`。对**不在**桥地址的 external 目标，网关从一个结果的 `structuredContent` 与 `_meta`（顶层）里**删除所有以 `io.idp.telos/` 开头的键**，再交给客户端（普通应答与流里的最终事件都做）；桥的目标不删；internal 目标不变。第三方因此不能伪造我们的标记（桥也要自己剥掉第三方发来的这类键）。**目录里同样**：`tools/list` 里 external 目标（桥或非桥）的每个工具，`_meta` 中除网关自己的 `io.idp.telos/external` 之外，所有以 `io.idp.telos/` 开头的键都删掉（`routing.Route.Listed`；钉住的定义不改）；internal 目标不变。以后新增的平台键，因此不会被第三方经评审、钉住的定义写进来。其余的键、没有这类键的结果，一个字节都不改。只看顶层这两个对象：平台读这些标记的地方就是这里；`content` 里各项自己的 `_meta` 不处理（HOST 不读）。
+
+| 去掉的控制（15.1） | 失败的测试 |
+|---|---|
+| 桥目标不加断言 | `TestABridgeTargetReceivesTheSignedAssertionAndNothingElseOfTheCaller`、`TestABridgeTargetIsNotCalledWithoutASignerAndCarriesNoIdentityThen` |
+| 断言之外还发明文 `io.idp.telos/caller` | `TestABridgeTargetReceivesTheSignedAssertionAndNothingElseOfTheCaller` |
+| 所有 external 目标都发断言 | `TestAnExternalTargetThatIsNotAtABridgeAddressStillReceivesNoAssertion`、`TestTheExternalUpstreamReceivesNoIdentityNoClientInfoNoTraceAndNoCustomMeta` 等 |
+| `aud` 不是桥的端点 | `TestABridgeTargetReceivesTheSignedAssertionAndNothingElseOfTheCaller` |
+| 没有密钥也照发 | `TestABridgeTargetIsNotCalledWithoutASignerAndCarriesNoIdentityThen` |
+| 非桥 external 的普通应答不删标记 / 流不删标记 | `TestTheKeysOfThePlatformAreRemovedFromAnExternalResultButNotFromABridges`（两个子测试各一） |
+| 桥的目标也删标记（普通应答 / 流） | 同上（两个子测试各一） |
+| external 工具的 `_meta` 里别的 `io.idp.telos/` 键不删 | `TestAnExternalToolCarriesNoKeyOfThePlatformButTheGatewaysMarker`、`TestTheMarkerIsSetForEveryToolOfAnExternalTargetAndNeverForAnInternalOne` |
+| 只删 `structuredContent` / 只删 `_meta` | 同上、`TestStripOurKeysLeavesAnythingElseAsItWas` |
+
 **契约**：`idp.telos.mcp` 1.2.0 → **1.3.0**，只有向后兼容的新增：Release 的目标多一个可选的 `class`（`"external"`）；调用记录多两个结果（`RESULT_TOO_LARGE`、`REVERSE_REQUEST_REFUSED`）；注册服务的 API（`openapi.yaml` 1.3.0）：登记与服务器的 `class`，`GET /api/v1/servers/{id}/catalog`，批准的可选请求体，网关状态里目标的 `failures`、`blocked`、`external`。迁移 `0009_server_class.sql`。`idp-contracts/idp.telos.mcp/1.3.0` 的发布副本要与 `api/contracts/` 逐字节相同（在那个仓库里放，不在这里）。
 
 **对内部目标的影响**：没有（以下是全部例外）：①目标状态里多了 `failures`（探测失败计数）、`blocked` 两个字段，内部目标的 `blocked` 就是此前的"漂移且 `driftAction` 为 block"；②`tools/list` 里内部目标的工具如果上游自己带了 `io.idp.telos/external` 键，现在被删掉（此前原样转发）。每一条都有内部目标的回归测试（见验证）。

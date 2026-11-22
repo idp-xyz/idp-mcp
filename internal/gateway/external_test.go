@@ -47,6 +47,8 @@ type extOptions struct {
 	tools     func(ext, in *hostileserver.Server) // set the catalogs that get approved
 	mutate    func(*release.Document)
 	bridges   string
+	signer    *CallerSigner
+	bridgeExt bool // the external target is at a bridge address
 }
 
 func toolsOf(t *testing.T, s *hostileserver.Server) []server.Tool {
@@ -106,6 +108,10 @@ func newExtHarness(t *testing.T, o extOptions) *extHarness {
 	rec := &recorder{}
 	cfg := Config{GatewayID: "g1", Clients: mustClients(t, o.clients), Info: server.ServerInfo{Name: "idp-mcp-gateway", Version: "test"}, DevMode: true,
 		CallTimeout: o.timeout, Recorder: rec, ExternalMaxResult: o.maxResult, ExternalMaxStream: o.maxStream, ExternalProbeFailures: o.failures}
+	cfg.CallerSigner = o.signer
+	if o.bridgeExt {
+		o.bridges = strings.TrimSuffix(strings.TrimPrefix(ext.URL(), "http://"), "/mcp")
+	}
 	if o.bridges != "" {
 		cfg.Bridges = parseBridges(t, o.bridges)
 	}
@@ -643,7 +649,8 @@ func TestTheMarkerIsSetForEveryToolOfAnExternalTargetAndNeverForAnInternalOne(t 
 	h := newExtHarness(t, extOptions{tools: func(ext, in *hostileserver.Server) {
 		mark := func(s *hostileserver.Server, v bool) {
 			tools := s.Tools()
-			tools[0]["_meta"] = map[string]any{server.MetaExternal: v, "com.example/flag": "kept"}
+			tools[0]["_meta"] = map[string]any{server.MetaExternal: v, "com.example/flag": "kept",
+				"io.idp.telos/internal": true, "io.idp.telos/authorizationRequired": map[string]any{"connection": "x"}}
 			tools = append(tools, map[string]any{"name": "plain", "inputSchema": map[string]any{"type": "object"}})
 			s.SetTools(tools)
 		}
@@ -672,6 +679,15 @@ func TestTheMarkerIsSetForEveryToolOfAnExternalTargetAndNeverForAnInternalOne(t 
 	}
 	if seen["int__search"]["com.example/flag"] != "kept" {
 		t.Errorf("the upstream's own _meta key was lost: %v", seen["int__search"])
+	}
+	// no other key of the platform survives in an external tool; an internal tool's own are left as pinned
+	for _, k := range []string{"io.idp.telos/internal", "io.idp.telos/authorizationRequired"} {
+		if _, has := seen["ext__search"][k]; has {
+			t.Errorf("ext__search still carries %s: %v", k, seen["ext__search"])
+		}
+		if _, has := seen["int__search"][k]; !has {
+			t.Errorf("int__search lost %s: %v", k, seen["int__search"])
+		}
 	}
 	// the exact form the HOST reads
 	raw := r.raw

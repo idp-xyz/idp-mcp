@@ -52,7 +52,8 @@ func targetByEndpoint(doc *release.Document, endpoint string) *release.Target {
 // W3C trace keys, and every key a client or an intermediary invented. The top-level params that continue a
 // multi-round flow (inputResponses, requestState) or ask for a task are dropped too: an external server is never
 // given a reason to answer with either, and a client that sends them is not served by it. The caller is not
-// forwarded whatever the target's identity mode says (D51 a), because this function does not look at the mode.
+// forwarded whatever the target's identity mode says (D51 a), because this function does not look at the mode. For a
+// target at a bridge address the caller's assertion is added afterwards, by assertCaller (D51 a, revised: ADR 15.1).
 func externalParams(params map[string]json.RawMessage) (map[string]json.RawMessage, json.RawMessage) {
 	out := make(map[string]json.RawMessage, len(params))
 	for k, v := range params {
@@ -77,6 +78,49 @@ func externalParams(params map[string]json.RawMessage) (map[string]json.RawMessa
 	}
 	out["_meta"], _ = json.Marshal(meta)
 	return out, token
+}
+
+// OurKeyPrefix is the prefix of the keys that mean something to the platform (io.idp.telos/external, the caller keys,
+// the bridge's authorization marker). An upstream that is not ours must not be able to send one.
+const OurKeyPrefix = "io.idp.telos/"
+
+// stripOurKeys removes every key that starts with OurKeyPrefix from the structuredContent and the _meta of the result
+// of a message of an external server that is not a bridge (D51 a, revised): a marker such as
+// io.idp.telos/authorizationRequired is the bridge's word, and a third party must not be able to put it in the
+// answer to a member. Only the top level of those two objects is looked at, which is where the platform reads them.
+// A message that has none of them is returned as it is, byte for byte.
+func stripOurKeys(raw []byte) []byte {
+	var msg map[string]json.RawMessage
+	if json.Unmarshal(raw, &msg) != nil || len(msg["result"]) == 0 {
+		return raw
+	}
+	var res map[string]json.RawMessage
+	if json.Unmarshal(msg["result"], &res) != nil {
+		return raw
+	}
+	changed := false
+	for _, field := range []string{"structuredContent", "_meta"} {
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(res[field], &obj) != nil || obj == nil {
+			continue
+		}
+		for k := range obj {
+			if strings.HasPrefix(k, OurKeyPrefix) {
+				delete(obj, k)
+				changed = true
+			}
+		}
+		res[field], _ = json.Marshal(obj)
+	}
+	if !changed {
+		return raw
+	}
+	msg["result"], _ = json.Marshal(res)
+	out, err := json.Marshal(msg)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // validProgressToken accepts a string of at most maxProgressToken bytes or an integer.
@@ -201,7 +245,7 @@ func progressMessage(raw []byte, token json.RawMessage) ([]byte, bool) {
 // Memory: the whole of a plain answer is held, up to ExternalMaxResult bytes; of a stream only one event at a time,
 // up to the same number, and nothing past ExternalMaxStream bytes is read at all, comments and keep-alive lines
 // included. So an upstream that never stops costs the gateway the one buffer and the call's time limit.
-func (g *Gateway) relayExternal(w http.ResponseWriter, req *server.Request, resp *http.Response, rec *callRecord, token json.RawMessage) string {
+func (g *Gateway) relayExternal(w http.ResponseWriter, req *server.Request, resp *http.Response, rec *callRecord, token json.RawMessage, bridge bool) string {
 	end := func(started bool, outcome, why string) string {
 		rec.reason(why)
 		text := "The call was ended by the gateway: " + why + "."
@@ -230,6 +274,9 @@ func (g *Gateway) relayExternal(w http.ResponseWriter, req *server.Request, resp
 		default:
 			g.upstreamError(w, req.ID, http.StatusBadGateway, "Upstream answer unusable; the outcome is unknown", invocation.OutcomeUnknown)
 			return invocation.OutcomeUnknown
+		}
+		if !bridge {
+			raw = stripOurKeys(raw)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
@@ -321,6 +368,9 @@ func (g *Gateway) relayExternal(w http.ResponseWriter, req *server.Request, resp
 					return invocation.OutcomeUnknown
 				}
 			case vFinal:
+				if !bridge {
+					msg = stripOurKeys(msg)
+				}
 				if !emit(msg) {
 					return invocation.OutcomeUnknown
 				}
