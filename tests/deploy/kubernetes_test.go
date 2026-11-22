@@ -299,6 +299,35 @@ func TestNetworkPolicyIsDefaultDenyWithTheGatewayOnItsPortOnly(t *testing.T) {
 	}
 }
 
+// the bridge (idp-mcp-bridge) is an upstream like idp-sandbox and idp-web: its namespace carries idp-mcp/mcp-upstream, and the gateway's and the
+// registry's egress names its MCP port, so that a deployment from these manifests reaches it without an edit
+func TestTheGatewayAndTheRegistryMayReachTheBridgesMCPPort(t *testing.T) {
+	m := loadAll(t)
+	seen := 0
+	for _, p := range m.byKind["NetworkPolicy"] {
+		if n := str(p, "metadata", "name"); n != "gateway" && n != "registry" {
+			continue
+		}
+		seen++
+		found := false
+		for _, rule := range list(p, "spec", "egress") {
+			upstream := false
+			for _, to := range list(rule, "to") {
+				upstream = upstream || str(to, "namespaceSelector", "matchLabels", "idp-mcp/mcp-upstream") == "true"
+			}
+			for _, port := range list(rule, "ports") {
+				found = found || (upstream && get(port, "port") == 8680)
+			}
+		}
+		if !found {
+			t.Errorf("%s: no egress to the upstream namespaces on 8680 (idp-mcp-bridge)", name(p))
+		}
+	}
+	if seen != 2 {
+		t.Errorf("found %d of the gateway and registry policies", seen)
+	}
+}
+
 func TestTheGatewayHasAValidClientsFileMountedWhereItsSettingPoints(t *testing.T) {
 	var cm, cfg, dep doc
 	for _, d := range load(t, "gateway.yaml") {

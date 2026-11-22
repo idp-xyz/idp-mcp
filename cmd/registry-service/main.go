@@ -194,14 +194,14 @@ func serve(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("IDP_DEPLOY_TIMEOUT: %w", err)
 	}
-	pol := &policy.Upstream{AllowedHosts: hostSet("IDP_ALLOWED_UPSTREAM_HOSTS"), PrivateHosts: hostSet("IDP_PRIVATE_UPSTREAM_HOSTS"), DevMode: dev}
-	staleAfter, err := time.ParseDuration(env("IDP_INSTANCE_STALE_AFTER", "30s"))
-	if err != nil {
-		return fmt.Errorf("IDP_INSTANCE_STALE_AFTER: %w", err)
-	}
 	bridges, err := policy.ParseEndpoints(env("IDP_BRIDGE_ENDPOINTS", ""))
 	if err != nil {
 		return fmt.Errorf("IDP_BRIDGE_ENDPOINTS: %w", err)
+	}
+	pol := &policy.Upstream{AllowedHosts: hostSet("IDP_ALLOWED_UPSTREAM_HOSTS"), PrivateHosts: hostSet("IDP_PRIVATE_UPSTREAM_HOSTS"), DevMode: dev, Bridges: bridges}
+	staleAfter, err := time.ParseDuration(env("IDP_INSTANCE_STALE_AFTER", "30s"))
+	if err != nil {
+		return fmt.Errorf("IDP_INSTANCE_STALE_AFTER: %w", err)
 	}
 	maxDesc, err := strconv.Atoi(env("IDP_EXTERNAL_MAX_DESCRIPTION", strconv.Itoa(registry.DefaultMaxExternalDescription)))
 	if err != nil || maxDesc < 1 {

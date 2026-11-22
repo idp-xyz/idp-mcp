@@ -64,6 +64,35 @@ func TestPermittedEndpoints(t *testing.T) {
 	}
 }
 
+// The bridge has one endpoint per connection, <base>/mcp/<id>: it does not end in /mcp, and at a bridge's address that is allowed; the
+// exemption is the path rule's and nothing else's (the host list, https or development mode, the addresses, the query).
+func TestABridgeEndpointNeedNotEndInMcp(t *testing.T) {
+	bridges, err := ParseEndpoints("http://mcp-internal:3111/mcp/,https://mcp.example.com/connections/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	with := func(p *Upstream) *Upstream { p.Bridges = bridges; return p }
+	for _, c := range []struct {
+		p   *Upstream
+		url string
+		ok  bool
+	}{
+		{with(pol(true, []string{"mcp-internal"}, "mcp-internal")), "http://mcp-internal:3111/mcp/github", true},
+		{with(pol(true, []string{"mcp-internal"}, "mcp-internal")), "http://mcp-internal:3111/mcp/thirdparty-pre", true},
+		{with(pol(false, []string{"mcp.example.com"})), "https://mcp.example.com/connections/github", true},
+		{with(pol(true, []string{"mcp-internal"}, "mcp-internal")), "http://mcp-internal:3111/other/github", false},   // not the bridge's prefix
+		{with(pol(true, []string{"mcp-internal"}, "mcp-internal")), "http://mcp-internal:3111/mcp/github?x=1", false}, // a query is refused everywhere
+		{with(pol(false, []string{"mcp-internal"}, "mcp-internal")), "http://mcp-internal:3111/mcp/github", false},    // https outside development mode
+		{pol(true, []string{"mcp-internal"}, "mcp-internal"), "http://mcp-internal:3111/mcp/github", false},           // no bridge named: the rule is as it was
+		{with(pol(true, []string{"mcp.example.com"})), "https://mcp.example.com/connections/github/", true},
+	} {
+		_, err := c.p.CheckEndpoint(context.Background(), c.url)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: got %v, want ok=%v", c.url, err, c.ok)
+		}
+	}
+}
+
 func TestRefusedEndpoints(t *testing.T) {
 	bad := []struct {
 		p      *Upstream

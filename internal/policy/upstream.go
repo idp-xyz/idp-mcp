@@ -27,6 +27,10 @@ type Upstream struct {
 	PrivateHosts map[string]bool
 	DevMode      bool
 	Resolver     func(ctx context.Context, host string) ([]netip.Addr, error)
+	// Bridges are the addresses of the bridge's endpoints (IDP_BRIDGE_ENDPOINTS, D50). The bridge has one endpoint per connection,
+	// <base>/mcp/<id>, which does not end in /mcp: an endpoint at one of these addresses is exempt from that rule and from nothing
+	// else (it is external, which the registry enforces separately, and it goes through every other check here).
+	Bridges Endpoints
 }
 
 // ErrBlocked wraps every policy refusal.
@@ -186,8 +190,8 @@ func (p *Upstream) CheckEndpoint(ctx context.Context, raw string) (*url.URL, err
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
 		return nil, blocked("malformed endpoint")
 	}
-	if !strings.HasSuffix(u.Path, "/mcp") || u.RawQuery != "" {
-		return nil, blocked("endpoint must end in /mcp and have no query")
+	if !(strings.HasSuffix(u.Path, "/mcp") || p.Bridges.Matches(raw)) || u.RawQuery != "" {
+		return nil, blocked("endpoint must end in /mcp (a bridge's endpoint may be /mcp/<connection>) and have no query")
 	}
 	host := strings.ToLower(u.Hostname())
 	if !p.AllowedHosts[host] {
