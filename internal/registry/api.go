@@ -136,6 +136,13 @@ func (a *API) routes(handle func(pattern string, h http.HandlerFunc)) {
 	m.HandleFunc("GET /api/v1/servers", a.admin(func(r *http.Request, p Principal) (int, any, error) {
 		return items(a.Svc.ListServers(r.Context(), p))
 	}))
+	m.HandleFunc("PATCH /api/v1/servers/{id}", a.admin(func(r *http.Request, p Principal) (int, any, error) {
+		var in UpdateServerInput
+		if err := decode(r, &in); err != nil {
+			return 0, nil, err
+		}
+		return one(a.Svc.UpdateServer(r.Context(), p, r.PathValue("id"), in))
+	}))
 	m.HandleFunc("GET /api/v1/servers/{id}", a.admin(func(r *http.Request, p Principal) (int, any, error) {
 		return one(a.Svc.GetServer(r.Context(), p, r.PathValue("id")))
 	}))

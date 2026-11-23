@@ -400,6 +400,31 @@ M6、M7 改了转发路径（调用者转发与签名）之后，官方符合性
 1. **先升级注册服务（迁移 `0009`），再升级网关，最后登记第一台 external 服务器。** 网关心跳里新的 `failures`、`blocked`、`external` 字段，旧的注册服务（按 `DisallowUnknownFields` 解码）会拒绝（只在有探测失败或有 external 目标时才出现，但不要靠这个）；旧的网关遇到带 `class` 的 Release 会因未知字段拒绝激活（部署失败并自动回到上一个 GOOD），所以 external 服务器要在所有网关升级之后再登记。
 2. 在桥上线之前不用设 `IDP_BRIDGE_ENDPOINTS`；桥上线时在注册服务与网关里设成同一个值。
 
+
+### 15.3 修订 D53：描述长度的上限按服务器设定（2026-11-23，契约 1.4.0）
+
+**起因**：对真实的 GitHub 托管 MCP 服务验证时，注册服务拒绝了它的整个目录：`tool pull_request_read: inputSchema/properties/method/description is 1546 bytes, more than the 1024 allowed`。28 个工具里只有这一处超过 1024（其次是 690）。统一把部署缺省调高，等于放宽所有第三方服务器；决策人选定：**按服务器设定，由运维给出**。
+
+| 项 | 决定 |
+|---|---|
+| 设定 | 登记 `class: external` 的服务器时可带 `maxDescriptionBytes`（正整数，字节）。不带：用部署缺省 `IDP_EXTERNAL_MAX_DESCRIPTION`（1024，不变）。`internal` 带它：400。 |
+| 上限 | `IDP_EXTERNAL_MAX_DESCRIPTION_CAP`（缺省 8192）：超过的登记或修改被拒绝（400，写明上限与设置名）。**缺省值必须不超过上限，两者启动时都校验**，不合格则注册服务不启动。 |
+| 登记后可否改 | **可以，且要被评审**：`PATCH /api/v1/servers/{id}`，请求体 `{"maxDescriptionBytes": 数字或 null}`（null = 回到部署缺省），运维可做。改成与现在相同的值什么也不变。有变化时：写审计 `server.update`（新值、旧值、改前的生命周期），服务器退回 `DRAFT`，所以必须重新发现（按新上限检查）、重新批准（四眼：批准人不是创建人）；已经做好的 Release 仍用它钉住的目录。**理由**：上限决定评审人要读多长的指令文字，放宽它与改目录同样需要评审；不让改则只能重新登记，丢掉审计与批准的连续性。 |
+| 记录与展示 | 登记的值进审计 `server.register`（`maxDescriptionBytes`，缺省为 null）；服务器记录多 `maxDescriptionBytes`（null = 缺省）；评审接口 `GET /api/v1/servers/{id}/catalog` 多 `descriptionLimit {bytes, deploymentDefault, cap, serverSetting}`（"允许到 `bytes` 字节，部署缺省 `deploymentDefault`"，internal 为 null）；每个快照多 `descriptionLimit`，是它的目录被检查时用的上限，**批准即钉住**（`approved.descriptionLimit`），审计 `server.discover` 也写。 |
+| 用在哪 | 描述限制只在注册服务里检查，发现与重新发现是同一处（`DiscoverServer`），都用这台服务器的上限（自己的，没有就部署缺省）。网关的漂移探测比较的是目录摘要，不检查描述长度，所以不需要这个值；一个批准后变长的描述改变摘要，被漂移检测拦截（D51-f），重新发现时又按同一上限检查。 |
+
+**契约**：`idp.telos.mcp` 1.3.0 → **1.4.0**，只有向后兼容的新增，且只在注册服务的 API（`openapi.yaml` 1.4.0）：登记的可选 `maxDescriptionBytes`，`PATCH /api/v1/servers/{id}`，服务器的 `maxDescriptionBytes`，评审视图的 `descriptionLimit`，快照的 `descriptionLimit`。Release、Envelope、InvocationRecord 的 JSON Schema 没有变，只有版本号（`schema.json` 的 `$id`、标题与示例说明）随之升到 1.4.0。迁移 `0010_server_description_limit.sql`（两列，均可为空）。`idp-contracts/idp.telos.mcp/1.4.0` 的发布副本在那个仓库里放。升级：先升级注册服务（迁移 `0010`）；没有设置的服务器行为与此前完全一致。
+
+| 去掉的控制（15.3） | 失败的测试 |
+|---|---|
+| 忽略服务器自己的上限（发现与重新发现用部署缺省） | `TestTheDescriptionLimitOfAnExternalServerIsTheOperatorsPerServerSettingUnderACap`（两种去法各一次） |
+| 不检查上限 `CAP` | 同上 |
+| internal 也接受该字段 | 同上 |
+| 修改不使批准失效 | 同上 |
+| 快照不记录上限 / 评审接口没有上限 | 同上 |
+| 登记的审计没有值 / 修改不写审计 | 同上 |
+| 启动时不校验缺省不超过上限 | 同上 |
+
 **15.2 补正（2026-11-22，平台验收 PATH O 发现）：桥的端点不以 `/mcp` 结尾。** 桥每条连接一个端点 `<桥的地址>/mcp/<连接 id>`，而登记与重新发现用的 `CheckEndpoint` 要求路径以 `/mcp` 结尾，所以任何一条连接都登记不了（`endpoint must end in /mcp`）。现在：登记在桥的地址上的端点（`IDP_BRIDGE_ENDPOINTS` 匹配，`policy.Upstream.Bridges`）免于**这一条**路径规则，其余检查不变（主机白名单、开发模式外要 https、地址分类、不许有查询串；类别必须是 external 仍由注册服务单独强制）。没有指名桥的地址时，规则与此前相同。测试：`TestABridgeEndpointNeedNotEndInMcp`。契约、迁移、网关的行为都不变。
 
 **没有做的**：

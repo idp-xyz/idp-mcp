@@ -118,7 +118,7 @@ func TestOpenAPIIsValidYAMLWithResolvableRefs(t *testing.T) {
 	ops := 0
 	for _, p := range paths {
 		for k := range p.(map[string]any) {
-			if k == "get" || k == "post" {
+			if k == "get" || k == "post" || k == "patch" {
 				ops++
 			}
 		}

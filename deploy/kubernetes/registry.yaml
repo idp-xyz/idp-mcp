@@ -27,6 +27,8 @@ data:
   # The longest description, in bytes, in the catalog of a server of class external (D53); over it, discovery is refused
   # and names the tool.
   IDP_EXTERNAL_MAX_DESCRIPTION: "1024"
+  # The most the operator may set for one external server (maxDescriptionBytes, ADR-0001 15.3); the default above may not exceed it.
+  IDP_EXTERNAL_MAX_DESCRIPTION_CAP: "8192"
   IDP_DEPLOY_TIMEOUT: "60s"
   IDP_TLS_CERT_FILE: "/etc/idp/tls/tls.crt"
   IDP_TLS_KEY_FILE: "/etc/idp/tls/tls.key"

@@ -68,6 +68,7 @@ services:
       # empty = none named) and the longest description of such a server's tools, in bytes
       IDP_BRIDGE_ENDPOINTS: ${IDP_BRIDGE_ENDPOINTS:-}
       IDP_EXTERNAL_MAX_DESCRIPTION: ${IDP_EXTERNAL_MAX_DESCRIPTION:-1024}
+      IDP_EXTERNAL_MAX_DESCRIPTION_CAP: ${IDP_EXTERNAL_MAX_DESCRIPTION_CAP:-8192}
       # MODE=oidc: TLS everywhere (certificates issued by deploy/e2e.sh into .local/tls)
       IDP_TLS_CERT_FILE: ${IDP_REGISTRY_TLS_CERT:-}
       IDP_TLS_KEY_FILE: ${IDP_REGISTRY_TLS_KEY:-}

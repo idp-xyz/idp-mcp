@@ -91,23 +91,26 @@ func NewSecret(prefix string) string {
 
 // Server is a registered upstream MCP server.
 type Server struct {
-	ID                 string    `json:"serverId"`
-	TargetName         string    `json:"targetName"`
-	DisplayName        string    `json:"displayName"`
-	Endpoint           string    `json:"endpoint"`
-	Network            string    `json:"network"`
-	Identity           string    `json:"identity"` // "none" or "forward": the verified caller is passed to the server
-	Class              string    `json:"class"`    // "internal" or "external": a third party's server (ADR-0001 D50)
-	Lifecycle          string    `json:"lifecycle"`
-	SnapshotID         *string   `json:"snapshotId"`
-	ApprovedSnapshotID *string   `json:"approvedSnapshotId"`
-	SnapshotDigest     *string   `json:"snapshotDigest"`
-	ApprovedDigest     *string   `json:"approvedDigest"`
-	ToolNames          []string  `json:"toolNames"`    // of the latest snapshot
-	Capabilities       []string  `json:"capabilities"` // federated capabilities of the latest snapshot
-	CreatedBy          string    `json:"createdBy"`
-	ApprovedBy         *string   `json:"approvedBy"`
-	CreatedAt          time.Time `json:"createdAt"`
+	ID          string `json:"serverId"`
+	TargetName  string `json:"targetName"`
+	DisplayName string `json:"displayName"`
+	Endpoint    string `json:"endpoint"`
+	Network     string `json:"network"`
+	Identity    string `json:"identity"` // "none" or "forward": the verified caller is passed to the server
+	Class       string `json:"class"`    // "internal" or "external": a third party's server (ADR-0001 D50)
+	// MaxDescriptionBytes is the operator's limit for the descriptions of this external server's catalog (ADR-0001
+	// 15.3); null = the deployment default (IDP_EXTERNAL_MAX_DESCRIPTION). Always null for an internal server.
+	MaxDescriptionBytes *int      `json:"maxDescriptionBytes"`
+	Lifecycle           string    `json:"lifecycle"`
+	SnapshotID          *string   `json:"snapshotId"`
+	ApprovedSnapshotID  *string   `json:"approvedSnapshotId"`
+	SnapshotDigest      *string   `json:"snapshotDigest"`
+	ApprovedDigest      *string   `json:"approvedDigest"`
+	ToolNames           []string  `json:"toolNames"`    // of the latest snapshot
+	Capabilities        []string  `json:"capabilities"` // federated capabilities of the latest snapshot
+	CreatedBy           string    `json:"createdBy"`
+	ApprovedBy          *string   `json:"approvedBy"`
+	CreatedAt           time.Time `json:"createdAt"`
 }
 
 // Grant lets roles use tools of a server.

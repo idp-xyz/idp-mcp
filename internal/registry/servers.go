@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -38,6 +39,49 @@ type Service struct {
 	// (D51); zero means DefaultMaxExternalDescription.
 	Bridges                policy.Endpoints
 	MaxExternalDescription int
+	// MaxExternalDescriptionCap is the most an operator may set for one server (maxDescriptionBytes); zero means
+	// DefaultMaxExternalDescriptionCap (ADR-0001 15.3).
+	MaxExternalDescriptionCap int
+}
+
+// DefaultMaxExternalDescriptionCap is the deployment's ceiling for a server's own limit.
+const DefaultMaxExternalDescriptionCap = 8192
+
+func (s *Service) descriptionCap() int {
+	if s.MaxExternalDescriptionCap > 0 {
+		return s.MaxExternalDescriptionCap
+	}
+	return DefaultMaxExternalDescriptionCap
+}
+
+// ValidateDescriptionLimits refuses a deployment whose default limit is above its cap.
+func (s *Service) ValidateDescriptionLimits() error {
+	if s.maxDescription() > s.descriptionCap() {
+		return fmt.Errorf("the default description limit (%d bytes) is above the cap (%d bytes)", s.maxDescription(), s.descriptionCap())
+	}
+	return nil
+}
+
+// descriptionLimitOf is the limit that applies to a server: its own, else the deployment default.
+func (s *Service) descriptionLimitOf(sv *Server) int {
+	if sv.MaxDescriptionBytes != nil {
+		return *sv.MaxDescriptionBytes
+	}
+	return s.maxDescription()
+}
+
+// checkDescriptionSetting refuses a per-server limit that is not allowed: for an internal server, not positive, or
+// above the cap.
+func (s *Service) checkDescriptionSetting(class string, n int) error {
+	switch {
+	case class != release.ClassExternal:
+		return fail(http.StatusBadRequest, "maxDescriptionBytes is for a server of class external only")
+	case n < 1:
+		return fail(http.StatusBadRequest, "maxDescriptionBytes must be a positive number of bytes")
+	case n > s.descriptionCap():
+		return fail(http.StatusBadRequest, "maxDescriptionBytes %d is above the cap of %d bytes this deployment allows (IDP_EXTERNAL_MAX_DESCRIPTION_CAP)", n, s.descriptionCap())
+	}
+	return nil
 }
 
 // DefaultMaxExternalDescription is the longest description, in bytes, an external server's tool may have, and the
@@ -62,7 +106,7 @@ func (s *Service) staleAfter() time.Duration {
 
 var roleRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
 
-const serverColumns = `s.id::text, s.target_name, s.display_name, s.endpoint, s.network, s.identity, s.class, s.lifecycle,
+const serverColumns = `s.id::text, s.target_name, s.display_name, s.endpoint, s.network, s.identity, s.class, s.max_description_bytes, s.lifecycle,
   s.snapshot_id::text, s.approved_snapshot_id::text, ls.digest, aps.digest,
   coalesce((SELECT array_agg(t->>'name' ORDER BY t->>'name') FROM jsonb_array_elements(ls.tools::jsonb) t), '{}'),
   coalesce((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(coalesce(ls.discovery->'capabilities', '{}'::jsonb)) k
@@ -72,7 +116,7 @@ FROM servers s LEFT JOIN snapshots ls ON ls.id = s.snapshot_id LEFT JOIN snapsho
 
 func scanServer(row pgx.Row) (*Server, error) {
 	var s Server
-	err := row.Scan(&s.ID, &s.TargetName, &s.DisplayName, &s.Endpoint, &s.Network, &s.Identity, &s.Class, &s.Lifecycle, &s.SnapshotID,
+	err := row.Scan(&s.ID, &s.TargetName, &s.DisplayName, &s.Endpoint, &s.Network, &s.Identity, &s.Class, &s.MaxDescriptionBytes, &s.Lifecycle, &s.SnapshotID,
 		&s.ApprovedSnapshotID, &s.SnapshotDigest, &s.ApprovedDigest, &s.ToolNames, &s.Capabilities, &s.CreatedBy, &s.ApprovedBy, &s.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
@@ -109,6 +153,9 @@ type RegisterInput struct {
 	// default) is today's behaviour. Fixed at registration, reviewed and pinned in the release: to change it,
 	// register the server again. A server at a bridge address must be external.
 	Class string `json:"class,omitempty"`
+	// MaxDescriptionBytes (class external only) is the longest description, in bytes, this server's catalog may have
+	// (ADR-0001 D53, 15.3); absent = the deployment default. At most the deployment's cap.
+	MaxDescriptionBytes *int `json:"maxDescriptionBytes,omitempty"`
 }
 
 // RegisterServer adds a DRAFT server after the endpoint passed the upstream policy.
@@ -138,6 +185,11 @@ func (s *Service) RegisterServer(ctx context.Context, p Principal, in RegisterIn
 	if in.Class == release.ClassExternal && in.Identity != release.IdentityNone {
 		return nil, fail(http.StatusBadRequest, "a server of class external cannot be sent the caller's identity: identity must be none")
 	}
+	if in.MaxDescriptionBytes != nil {
+		if err := s.checkDescriptionSetting(in.Class, *in.MaxDescriptionBytes); err != nil {
+			return nil, err
+		}
+	}
 	u, err := s.Policy.CheckEndpoint(ctx, in.Endpoint)
 	if err != nil {
 		return nil, fail(http.StatusBadRequest, "%s", err.Error())
@@ -148,14 +200,14 @@ func (s *Service) RegisterServer(ctx context.Context, p Principal, in RegisterIn
 	id := NewID()
 	var out *Server
 	err = s.Store.InTenant(ctx, p.Tenant, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO servers (id, tenant_id, target_name, display_name, endpoint, network, identity, class, lifecycle, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'DRAFT', $9)`, id, p.Tenant, in.TargetName, in.DisplayName, u.String(), s.Policy.NetworkOf(u), in.Identity, in.Class, p.Subject); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO servers (id, tenant_id, target_name, display_name, endpoint, network, identity, class, max_description_bytes, lifecycle, created_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'DRAFT', $10)`, id, p.Tenant, in.TargetName, in.DisplayName, u.String(), s.Policy.NetworkOf(u), in.Identity, in.Class, in.MaxDescriptionBytes, p.Subject); err != nil {
 			if strings.Contains(err.Error(), "duplicate key") {
 				return fail(http.StatusConflict, "a server with this targetName or endpoint is already registered")
 			}
 			return err
 		}
-		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.register", id, map[string]string{"endpoint": client.Redact(u.String()), "targetName": in.TargetName, "identity": in.Identity, "class": in.Class}); err != nil {
+		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.register", id, map[string]any{"endpoint": client.Redact(u.String()), "targetName": in.TargetName, "identity": in.Identity, "class": in.Class, "maxDescriptionBytes": in.MaxDescriptionBytes}); err != nil {
 			return err
 		}
 		var err error
@@ -273,8 +325,11 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 	if err := s.checkSchemas(tools); err != nil {
 		return nil, fail(http.StatusUnprocessableEntity, "catalog refused: %s", err.Error())
 	}
+	var descLimit *int // the limit this catalog was checked against, recorded with the snapshot
 	if sv.Class == release.ClassExternal {
-		if err := CheckExternalDescriptions(tools, prompts, s.maxDescription()); err != nil {
+		l := s.descriptionLimitOf(sv)
+		descLimit = &l
+		if err := CheckExternalDescriptions(tools, prompts, l); err != nil {
 			return nil, fail(http.StatusUnprocessableEntity, "catalog refused: %s", err.Error())
 		}
 	}
@@ -300,9 +355,9 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 			return err
 		}
 		snap := NewID()
-		if _, err := tx.Exec(ctx, `INSERT INTO snapshots (id, tenant_id, server_id, digest, discovery, tools, prompts, resources, resource_templates)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			snap, p.Tenant, id, digest, discovery, string(toolsJSON), string(promptsJSON), string(resourcesJSON), string(templatesJSON)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO snapshots (id, tenant_id, server_id, digest, discovery, tools, prompts, resources, resource_templates, description_limit)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			snap, p.Tenant, id, digest, discovery, string(toolsJSON), string(promptsJSON), string(resourcesJSON), string(templatesJSON), descLimit); err != nil {
 			return err
 		}
 		lifecycle := "REVIEWED"
@@ -313,7 +368,67 @@ func (s *Service) DiscoverServer(ctx context.Context, p Principal, id string) (*
 			return err
 		}
 		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.discover", id, map[string]any{"digest": digest, "tools": len(tools), "prompts": len(prompts),
-			"resources": len(resources), "resourceTemplates": len(templates), "lifecycle": lifecycle}); err != nil {
+			"resources": len(resources), "resourceTemplates": len(templates), "lifecycle": lifecycle, "descriptionLimit": descLimit}); err != nil {
+			return err
+		}
+		out, err = getServer(ctx, tx, id, false)
+		return err
+	})
+	return out, err
+}
+
+// UpdateServerInput changes the description limit of a server of class external. MaxDescriptionBytes is a JSON
+// number to set the limit and null to go back to the deployment default.
+type UpdateServerInput struct {
+	MaxDescriptionBytes json.RawMessage `json:"maxDescriptionBytes"`
+}
+
+// UpdateServer changes the per-server description limit of a server of class external (ADR-0001 15.3). It is
+// audited, and it invalidates the approval: the server goes back to DRAFT, so that its catalog has to be discovered
+// again under the new limit and approved again by someone else; releases already made keep what they pinned. A change
+// to the value it already has changes nothing.
+func (s *Service) UpdateServer(ctx context.Context, p Principal, id string, in UpdateServerInput) (*Server, error) {
+	if err := require(p, RoleOperator); err != nil {
+		return nil, err
+	}
+	var want *int
+	switch raw := strings.TrimSpace(string(in.MaxDescriptionBytes)); raw {
+	case "":
+		return nil, fail(http.StatusBadRequest, "maxDescriptionBytes is required: a number of bytes, or null for the deployment default")
+	case "null":
+	default:
+		var n int
+		if err := json.Unmarshal(in.MaxDescriptionBytes, &n); err != nil {
+			return nil, fail(http.StatusBadRequest, "maxDescriptionBytes must be a whole number of bytes or null")
+		}
+		want = &n
+	}
+	var out *Server
+	err := s.Store.InTenant(ctx, p.Tenant, func(tx pgx.Tx) error {
+		sv, err := getServer(ctx, tx, id, true)
+		if err != nil {
+			return err
+		}
+		if sv.Class != release.ClassExternal {
+			return fail(http.StatusBadRequest, "maxDescriptionBytes is for a server of class external only")
+		}
+		if sv.Lifecycle == "RETIRED" {
+			return fail(http.StatusConflict, "server is retired")
+		}
+		if want != nil {
+			if err := s.checkDescriptionSetting(sv.Class, *want); err != nil {
+				return err
+			}
+		}
+		if (want == nil && sv.MaxDescriptionBytes == nil) || (want != nil && sv.MaxDescriptionBytes != nil && *want == *sv.MaxDescriptionBytes) {
+			out = sv
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `UPDATE servers SET max_description_bytes = $2, lifecycle = 'DRAFT', updated_at = now() WHERE id = $1`, id, want); err != nil {
+			return err
+		}
+		if err := audit.Write(ctx, tx, p.Tenant, p.Subject, "server.update", id, map[string]any{"maxDescriptionBytes": want, "was": sv.MaxDescriptionBytes,
+			"lifecycleWas": sv.Lifecycle, "lifecycle": "DRAFT"}); err != nil {
 			return err
 		}
 		out, err = getServer(ctx, tx, id, false)

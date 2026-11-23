@@ -1,5 +1,5 @@
 {
-  "description": "idp.telos.mcp 1.3.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
+  "description": "idp.telos.mcp 1.4.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
   "generatedBy": "go test ./internal/release -run TestContract -update",
   "examples": [
     {

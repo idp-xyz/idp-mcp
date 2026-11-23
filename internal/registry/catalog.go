@@ -29,6 +29,17 @@ type CatalogSnapshot struct {
 	Prompts           []server.Prompt           `json:"prompts"`
 	Resources         []server.Resource         `json:"resources"`
 	ResourceTemplates []server.ResourceTemplate `json:"resourceTemplates"`
+	// DescriptionLimit is the limit, in bytes, that the catalog was checked against (external servers only; null for an
+	// internal server and for a snapshot taken before ADR-0001 15.3). Approving the snapshot pins it.
+	DescriptionLimit *int `json:"descriptionLimit"`
+}
+
+// DescriptionLimit is what the reviewer of an external server's catalog is told about the limit on its descriptions.
+type DescriptionLimit struct {
+	Bytes             int  `json:"bytes"`             // what applies to this server now
+	DeploymentDefault int  `json:"deploymentDefault"` // IDP_EXTERNAL_MAX_DESCRIPTION
+	Cap               int  `json:"cap"`               // IDP_EXTERNAL_MAX_DESCRIPTION_CAP
+	ServerSetting     *int `json:"serverSetting"`     // the operator's value for this server; null = the default
 }
 
 // Change is one entry of a catalog that was added, removed or changed since the approved snapshot. Fields names
@@ -52,12 +63,15 @@ type CatalogChanges struct {
 
 // CatalogView is what a reviewer reads before approving a server or a new catalog of it.
 type CatalogView struct {
-	ServerID   string           `json:"serverId"`
-	TargetName string           `json:"targetName"`
-	Class      string           `json:"class"`
-	Latest     *CatalogSnapshot `json:"latest"`   // what approval would approve; null before the first discovery
-	Approved   *CatalogSnapshot `json:"approved"` // what the gateways run now; null before the first approval
-	Changes    CatalogChanges   `json:"changes"`
+	ServerID   string `json:"serverId"`
+	TargetName string `json:"targetName"`
+	Class      string `json:"class"`
+	// DescriptionLimit is set for a server of class external: "descriptions allowed up to Bytes bytes (deployment
+	// default DeploymentDefault)". Null for an internal server.
+	DescriptionLimit *DescriptionLimit `json:"descriptionLimit"`
+	Latest           *CatalogSnapshot  `json:"latest"`   // what approval would approve; null before the first discovery
+	Approved         *CatalogSnapshot  `json:"approved"` // what the gateways run now; null before the first approval
+	Changes          CatalogChanges    `json:"changes"`
 }
 
 func loadSnapshot(ctx context.Context, tx pgx.Tx, id *string) (*CatalogSnapshot, error) {
@@ -66,8 +80,8 @@ func loadSnapshot(ctx context.Context, tx pgx.Tx, id *string) (*CatalogSnapshot,
 	}
 	var snap CatalogSnapshot
 	var tools, prompts, resources, templates string
-	if err := tx.QueryRow(ctx, `SELECT id::text, digest, created_at, tools, prompts, resources, resource_templates FROM snapshots WHERE id = $1`, *id).
-		Scan(&snap.SnapshotID, &snap.Digest, &snap.CreatedAt, &tools, &prompts, &resources, &templates); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id::text, digest, created_at, tools, prompts, resources, resource_templates, description_limit FROM snapshots WHERE id = $1`, *id).
+		Scan(&snap.SnapshotID, &snap.Digest, &snap.CreatedAt, &tools, &prompts, &resources, &templates, &snap.DescriptionLimit); err != nil {
 		return nil, err
 	}
 	var err error
@@ -94,6 +108,9 @@ func (s *Service) GetCatalog(ctx context.Context, p Principal, id string) (*Cata
 			return err
 		}
 		v := &CatalogView{ServerID: sv.ID, TargetName: sv.TargetName, Class: sv.Class}
+		if sv.Class == release.ClassExternal {
+			v.DescriptionLimit = &DescriptionLimit{Bytes: s.descriptionLimitOf(sv), DeploymentDefault: s.maxDescription(), Cap: s.descriptionCap(), ServerSetting: sv.MaxDescriptionBytes}
+		}
 		if v.Latest, err = loadSnapshot(ctx, tx, sv.SnapshotID); err != nil {
 			return err
 		}

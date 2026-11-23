@@ -22,7 +22,9 @@
 //	IDP_BRIDGE_ENDPOINTS         addresses of the bridge endpoints, comma separated: hosts (host or host:port) or
 //	                             http(s) URL prefixes. A server registered at one must be of class external
 //	                             (ADR-0001 D50). Empty by default
-//	IDP_EXTERNAL_MAX_DESCRIPTION longest description, in bytes, in the catalog of an external server (1024; D53)
+//	IDP_EXTERNAL_MAX_DESCRIPTION longest description, in bytes, in the catalog of an external server (1024; D53);
+//	                             the operator may set another limit for one server (maxDescriptionBytes, ADR-0001 15.3)
+//	IDP_EXTERNAL_MAX_DESCRIPTION_CAP  most that a per-server limit may be (8192); the default above may not exceed it
 //	IDP_DEPLOY_TIMEOUT           how long a deployment waits for the gateway's attestation (30s)
 //	IDP_INSTANCE_STALE_AFTER     a gateway instance silent for longer no longer counts (30s)
 //	IDP_METRICS_LISTEN           serve Prometheus metrics (/metrics) on this address; off when unset
@@ -207,8 +209,15 @@ func serve(log *slog.Logger) error {
 	if err != nil || maxDesc < 1 {
 		return errors.New("IDP_EXTERNAL_MAX_DESCRIPTION must be a positive number of bytes")
 	}
-	svc := &registry.Service{Store: store, Policy: pol, Bridges: bridges, MaxExternalDescription: maxDesc, DeployTimeout: deployTimeout, PollEvery: 250 * time.Millisecond, StaleAfter: staleAfter, Log: log,
+	maxDescCap, err := strconv.Atoi(env("IDP_EXTERNAL_MAX_DESCRIPTION_CAP", strconv.Itoa(registry.DefaultMaxExternalDescriptionCap)))
+	if err != nil || maxDescCap < 1 {
+		return errors.New("IDP_EXTERNAL_MAX_DESCRIPTION_CAP must be a positive number of bytes")
+	}
+	svc := &registry.Service{Store: store, Policy: pol, Bridges: bridges, MaxExternalDescription: maxDesc, MaxExternalDescriptionCap: maxDescCap, DeployTimeout: deployTimeout, PollEvery: 250 * time.Millisecond, StaleAfter: staleAfter, Log: log,
 		Upstream: &client.Client{HTTP: client.NewHTTPClient(pol, 15*time.Second, upstreamTLS), Info: server.ServerInfo{Name: "idp-mcp-registry", Version: version}}}
+	if err := svc.ValidateDescriptionLimits(); err != nil {
+		return fmt.Errorf("IDP_EXTERNAL_MAX_DESCRIPTION: %w", err)
+	}
 	certFile, keyFile, clientCA := env("IDP_TLS_CERT_FILE", ""), env("IDP_TLS_KEY_FILE", ""), env("IDP_GATEWAY_CLIENT_CA_FILE", "")
 	if clientCA != "" && certFile == "" {
 		return errors.New("IDP_GATEWAY_CLIENT_CA_FILE needs IDP_TLS_CERT_FILE and IDP_TLS_KEY_FILE")

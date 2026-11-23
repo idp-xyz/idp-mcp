@@ -1,6 +1,6 @@
 package release
 
-// The published contract idp.telos.mcp 1.3.0 (idp-contracts/idp.telos.mcp/1.3.0) is produced here.
+// The published contract idp.telos.mcp 1.4.0 (idp-contracts/idp.telos.mcp/1.4.0) is produced here.
 // api/contracts/schema.json is written by hand; these tests prove it describes exactly what this
 // package seals and what the gateway records. api/contracts/examples.json is generated from Go
 // values (go test ./internal/release -run TestContract -update) and checked on every run, so every
@@ -29,7 +29,7 @@ var update = flag.Bool("update", false, "regenerate api/contracts/examples.json 
 
 const (
 	contractDir = "../../api/contracts"
-	contractID  = "urn:idp:telos:mcp:1.3.0"
+	contractID  = "urn:idp:telos:mcp:1.4.0"
 )
 
 type noLoader struct{}
@@ -257,7 +257,7 @@ func buildExamples(t *testing.T) []byte {
 		add("InvocationRecord", r)
 	}
 	b, err := json.MarshalIndent(examplesFile{
-		Description: "idp.telos.mcp 1.3.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
+		Description: "idp.telos.mcp 1.4.0 的示例：每一个都是 idp-mcp 实际产出的文档（Release 经 release.Seal 密封，InvocationRecord 是网关写入的记录）。",
 		GeneratedBy: "go test ./internal/release -run TestContract -update",
 		Examples:    out,
 	}, "", "  ")
