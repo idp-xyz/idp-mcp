@@ -32,7 +32,7 @@ cp -r "$PYSDK/src" "$OUT/pysdk/src"
 cp -r "$PYSDK/examples/servers/everything-server/mcp_everything_server" "$OUT/pysdk/everything/"
 cp deploy/fixtures/Dockerfile.upstream deploy/fixtures/reference_main.py "$OUT/"
 BASE="$(sed -nE 's/^ARG BASE=(.*)$/\1/p' deploy/fixtures/Dockerfile.upstream)"
-bash deploy/pull-image.sh "$BASE"   # with retries; the build below does not pull
+bash deploy/pull-image.sh "$BASE"   # with retries; the build below does not pull   # mirror:variable (the ARG BASE of the Dockerfile.upstream: a mirror name)
 docker build --network none --pull=false -t "$TAG" -f "$OUT/Dockerfile.upstream" "$OUT" > "$OUT/build.log" 2>&1 \
   || { tail -20 "$OUT/build.log" >&2; echo 'BLOCKED: docker build failed' >&2; exit 2; }
 echo "OK: $TAG $(docker image inspect --format '{{.Id}}' "$TAG")"

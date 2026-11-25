@@ -2,7 +2,7 @@
 # on private service names (minimal :3111 = Node SDK echo/sum, reference :3221 = Python Everything
 # Server). Built by deploy/fixtures/build.sh with --network none from copies it patches to listen on
 # 0.0.0.0 and to accept service-name Host headers (the originals are localhost-only by design).
-ARG BASE=public.ecr.aws/docker/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+ARG BASE=ghcr.io/idp-xyz/mirror:public.ecr.aws__docker__library__python__3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 FROM ${BASE}
 RUN useradd --system --uid 10001 --user-group --home-dir /opt --shell /usr/sbin/nologin fixture
 COPY node /usr/local/bin/node

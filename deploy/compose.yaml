@@ -26,7 +26,7 @@ volumes:
 
 services:
   postgres:
-    image: ${IDP_PG_IMAGE:-public.ecr.aws/docker/library/postgres:17-alpine}
+    image: ${IDP_PG_IMAGE:-ghcr.io/idp-xyz/mirror:public.ecr.aws__docker__library__postgres__17-alpine}
     networks: [data]
     environment:
       POSTGRES_PASSWORD: ${IDP_PG_OWNER_PASSWORD:?run deploy/e2e.sh}
@@ -111,7 +111,7 @@ services:
   # Issuer = the URL clients use (http://127.0.0.1:7080/realms/idp); containers fetch the JWKS
   # over the private name keycloak:7080 (backchannel). TEST DOUBLE: start-dev, no TLS.
   keycloak:
-    image: ${IDP_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.8.1}
+    image: ${IDP_KEYCLOAK_IMAGE:-ghcr.io/idp-xyz/mirror:quay.io__keycloak__keycloak__26.8.1}
     profiles: [jwt]
     command: [start-dev, --import-realm]
     networks: [edge, upstream]
@@ -131,7 +131,7 @@ services:
   # delegation (preview) enabled. Issuer https://localhost:8443/realms/idp; containers reach it as
   # https://keycloak:8443 (backchannel) and trust the development CA.
   keycloak-prod:
-    image: ${IDP_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.8.1}
+    image: ${IDP_KEYCLOAK_IMAGE:-ghcr.io/idp-xyz/mirror:quay.io__keycloak__keycloak__26.8.1}
     profiles: [oidc]
     command: [start, --db, postgres, --db-url, 'jdbc:postgresql://postgres:5432/keycloak', --db-username, postgres,
               --db-password, '${IDP_PG_OWNER_PASSWORD:?run deploy/e2e.sh}', --https-certificate-file, /etc/idp/tls/keycloak.crt,
