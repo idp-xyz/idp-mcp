@@ -489,3 +489,11 @@ M6、M7 改了转发路径（调用者转发与签名）之后，官方符合性
 | D53 registry: invisible characters | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted`、`TestTheDescriptionsOfAnExternalCatalogAreBoundedAndHaveNoInvisibleText` |
 | D53 registry: diff reports changes | `TestAThirdPartysServerIsRegisteredReviewedPinnedAndRestricted`、`TestTheDiffOfTwoCatalogsNamesWhatChanged` |
 
+
+## 16. D54：为每个工具声明结果的敏感级别（2026-11-25 决策人裁定；只是规则，尚未实施）
+
+起因：业务数据最常见的入口是工具的结果，而 HOST 的敏感上限（idp-host D43、D44）只管附件与 CMI 条目。要让 HOST 对工具结果按同一个上限筛选（idp-host D64），网关得先说清每个工具的结果有多敏感。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| D54 | **目标登记里声明结果的敏感级别**：每个目标有一个缺省级别 `resultSensitivity`（`public`、`internal`、`confidential`、`restricted` 之一），可以按工具名模式覆盖。网关在给 HOST 的工具列表里，把每个工具的级别写进工具的 `_meta`（键 `io.idp.telos/resultSensitivity`）。MCP 服务可以在单个结果的 `_meta` 里给出更高的级别，或者按字段标出级别；网关原样转交，只许调高，不许调低。现有的每个目标在 HOST 启用 D64 之前都要登记缺省级别，逐个由负责人确认（例如联网搜索是 `public`）。没有登记的目标，HOST 按超限处理（idp-host D64-5）。 | 级别由最了解数据的一方声明：登记时由平台定缺省值，运行时由服务方按单个结果调高。放在登记里，与工具白名单、仅限 HOST 的规则（D48、D52）在同一处审查。 |
